@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-08-19 00:42:05 +0100",
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python": "3.12.12",
+  "input_rows": 10000,
+  "reference_rows": 20000,
+  "prepare_seconds": 2.2377725999976974,
+  "ingest_seconds": 0.15132789999915985,
+  "timings": {
+    "input_count": 10000,
+    "candidate_count": 477500,
+    "matched_count": 10000,
+    "review_count": 0,
+    "unmatched_count": 0,
+    "parse_seconds": 1.108152,
+    "candidate_query_seconds": 5.568145,
+    "scoring_seconds": 1.269379,
+    "aggregation_seconds": 1.236837,
+    "total_seconds": 9.18409,
+    "throughput_per_second": 1088.84,
+    "duckdb_threads": 4,
+    "python": "3.12.12",
+    "platform": "Windows-10-10.0.19045-SP0"
+  }
+}
