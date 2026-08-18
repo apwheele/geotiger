@@ -86,6 +86,12 @@ from its default of 0 to require a score gap from the runner-up when a project
 needs especially conservative automatic assignment. Thresholds, weights,
 blocking, and interpolation settings are all configurable.
 
+Some raw TIGER/Line address-range vintages contain ZIP codes but no textual
+city field. With `strict_locality=True`, an input city therefore will not match
+an un-enriched reference row. Keep that setting for strict city/state/ZIP
+validation, enrich the range table with local place names, or explicitly set
+`strict_locality=False` when state/ZIP blocking is the intended rule.
+
 ## Local/privacy boundary
 
 `download` and `from_pygris` explicitly fetch TIGER data. `prepare` and
