@@ -231,7 +231,7 @@ checked-in baseline report.
 
 The current synthetic baseline is about 20,000 input rows/second on the
 development workstation. The full 135,088-row Durham demo processed about
-6,722 input rows/second with 7,622 prepared intersection points; its one-time
+11,394 input rows/second with 7,622 prepared intersection points; its one-time
 intersection-aware TIGER expansion took 26.6 seconds after vectorization; see
 [`reports/durham_demo_timing.md`](reports/durham_demo_timing.md). DuckDB uses
 its configured thread pool for joins, while parsing and scoring use optimized

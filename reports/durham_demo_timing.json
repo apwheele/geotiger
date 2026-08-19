@@ -13,11 +13,11 @@
   "matched": 115919,
   "review": 10,
   "unmatched": 19159,
-  "parse_seconds": 8.246993,
-  "candidate_query_seconds": 9.921923,
-  "scoring_seconds": 0.208612,
-  "aggregation_seconds": 0.903304,
-  "geocode_seconds": 20.09636,
-  "throughput_per_second": 6722.013,
+  "parse_seconds": 3.968838,
+  "candidate_query_seconds": 6.464592,
+  "scoring_seconds": 0.142251,
+  "aggregation_seconds": 0.546209,
+  "geocode_seconds": 11.855995,
+  "throughput_per_second": 11394.067,
   "duckdb_threads": 4
 }

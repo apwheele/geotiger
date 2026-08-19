@@ -123,6 +123,19 @@ def _text_similarity_batch(left: pd.Series, right: pd.Series) -> pd.Series:
     return scores
 
 
+def _parse_cache_text(value: Any) -> str:
+    """Convert a scalar input field into a stable per-run cache key part."""
+
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 def _cache_key_series(parsed: pd.DataFrame) -> pd.Series:
     """Build historical-cache keys without a row-wise Python apply."""
 
@@ -250,16 +263,26 @@ class Geocoder:
 
         parse_started = time.perf_counter()
         parsed_rows: list[dict[str, Any]] = []
+        parsed_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for row in frame.to_dict(orient="records"):
             input_id = int(row["input_id"])
-            parsed = parse_record(
-                row,
-                address_column=address_column,
-                city_column=city_column,
-                state_column=state_column,
-                zip_column=zip_column,
+            cache_key = (
+                _parse_cache_text(row.get(address_column, "")),
+                _parse_cache_text(row.get(city_column, "")) if city_column else "",
+                _parse_cache_text(row.get(state_column, "")) if state_column else "",
+                _parse_cache_text(row.get(zip_column, "")) if zip_column else "",
             )
-            parsed_rows.append({"input_id": input_id, **parsed.to_dict()})
+            parsed_values = parsed_cache.get(cache_key)
+            if parsed_values is None:
+                parsed_values = parse_record(
+                    row,
+                    address_column=address_column,
+                    city_column=city_column,
+                    state_column=state_column,
+                    zip_column=zip_column,
+                ).to_dict()
+                parsed_cache[cache_key] = parsed_values
+            parsed_rows.append({"input_id": input_id, **parsed_values})
         parsed_frame = pd.DataFrame(
             parsed_rows,
             columns=[

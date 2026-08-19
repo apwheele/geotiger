@@ -612,6 +612,7 @@ class GeoTIGERStore:
         exact_house_number_first: bool = True,
         exact_street: bool = False,
         street_fallback: bool = True,
+        _intersection_only: bool = False,
     ) -> pd.DataFrame:
         """Return blocked candidates for parsed input records.
 
@@ -620,6 +621,46 @@ class GeoTIGERStore:
         """
 
         self.create()
+        if not _intersection_only and len(inputs) and "is_intersection" in inputs.columns:
+            intersection_mask = inputs["is_intersection"].fillna(False).astype(bool)
+            if intersection_mask.any():
+                intersection_candidates = self.candidate_query(
+                    inputs.loc[intersection_mask],
+                    house_number_tolerance=house_number_tolerance,
+                    street_blocking=street_blocking,
+                    strict_locality=strict_locality,
+                    exact_street_first=False,
+                    exact_house_number_first=False,
+                    exact_street=True,
+                    street_fallback=False,
+                    _intersection_only=True,
+                )
+                ordinary_inputs = inputs.loc[~intersection_mask]
+                if not len(ordinary_inputs):
+                    return intersection_candidates
+                ordinary_candidates = self.candidate_query(
+                    ordinary_inputs,
+                    house_number_tolerance=house_number_tolerance,
+                    street_blocking=street_blocking,
+                    strict_locality=strict_locality,
+                    exact_street_first=exact_street_first,
+                    exact_house_number_first=exact_house_number_first,
+                    exact_street=exact_street,
+                    street_fallback=street_fallback,
+                )
+                candidate_frames = [
+                    candidate_frame
+                    for candidate_frame in (intersection_candidates, ordinary_candidates)
+                    if len(candidate_frame)
+                ]
+                return (
+                    pd.concat(candidate_frames, ignore_index=True)
+                    if candidate_frames
+                    else pd.DataFrame()
+                )
+        if _intersection_only:
+            exact_street_first = False
+            exact_house_number_first = False
         if exact_street_first and not exact_street:
             eligible = inputs.loc[inputs["street_norm"].fillna("").ne("")]
             exact = self.candidate_query(
@@ -692,33 +733,39 @@ class GeoTIGERStore:
         view = f"_geotiger_inputs_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
         conditions = []
-        conditions.append("coalesce(a.is_intersection, FALSE) = i.is_intersection")
-        conditions.append("(NOT i.is_intersection OR a.intersection_key = i.intersection_key)")
+        if _intersection_only:
+            conditions.extend(
+                [
+                    "a.is_intersection IS TRUE",
+                    "a.intersection_key = i.intersection_key",
+                ]
+            )
+        else:
+            conditions.append("a.is_intersection IS NOT TRUE")
         for column in ("state_norm",):
             if frame[column].ne("").all():
                 conditions.append(f"a.{column} = i.{column}")
             else:
                 conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
-        if exact_street:
-            conditions.append("a.street_norm = i.street_norm")
-        elif street_blocking:
-            if frame["street_block"].ne("").all():
-                conditions.append("(i.is_intersection OR a.street_block = i.street_block)")
-            else:
-                conditions.append(
-                    "(i.is_intersection OR i.street_block = '' OR "
-                    "a.street_block = i.street_block)"
-                )
+        if not _intersection_only:
+            if exact_street:
+                conditions.append("a.street_norm = i.street_norm")
+            elif street_blocking:
+                if frame["street_block"].ne("").all():
+                    conditions.append("a.street_block = i.street_block")
+                else:
+                    conditions.append("(i.street_block = '' OR a.street_block = i.street_block)")
         if strict_locality:
             for column in ("city_norm", "zip5"):
                 if frame[column].ne("").all():
                     conditions.append(f"a.{column} = i.{column}")
                 else:
                     conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
-        conditions.append(
-            f"(i.is_intersection OR i.house_number IS NULL OR "
-            f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)})"
-        )
+        if not _intersection_only:
+            conditions.append(
+                f"(i.house_number IS NULL OR "
+                f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)})"
+            )
         join_where = " AND ".join(conditions) or "TRUE"
         query = f"""
             SELECT

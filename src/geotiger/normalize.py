@@ -353,6 +353,19 @@ def _intersection_parts(raw: str) -> tuple[int | None, str, str] | None:
     return house_number, parts[0], parts[1]
 
 
+def _looks_like_intersection(raw: str) -> bool:
+    """Cheaply screen strings before running the full intersection regex."""
+
+    upper = f" {raw.upper()} "
+    return (
+        any(separator in raw for separator in ("/", "&", "@", "+"))
+        or " AT " in upper
+        or " AND " in upper
+        or " INTERSECTION OF " in upper
+        or " CORNER OF " in upper
+    )
+
+
 def parse_address(
     address: Any,
     *,
@@ -370,7 +383,7 @@ def parse_address(
     raw = "" if address is None else str(address)
     if raw.strip().upper() in {"NAN", "<NA>", "NONE"}:
         raw = ""
-    parts = _intersection_parts(raw) if raw else None
+    parts = _intersection_parts(raw) if raw and _looks_like_intersection(raw) else None
     if parts is not None:
         house_number, left, right = parts
         locality = _parse_single_address(
