@@ -19,11 +19,11 @@ TIGER data and does not make any geocoding requests. Candidate density is the
 main variable that can make a real run slower: a broad ZIP/city block or a
 large house-number tolerance increases the number of fuzzy comparisons.
 GeoTIGER therefore uses adaptive blocking by default: it tries exact
-normalized street and exact expanded house number first, then applies house
-number tolerance and finally street-signature fallback only for unresolved
-records. The Durham notebook disables the broadest fallback because its public
-addresses are standardized and the goal is a high-throughput reproducible
-midpoint geocode.
+normalized street and exact expanded house number first, then tries canonical
+street-name and phonetic keys, applies house-number tolerance, and finally
+uses broad street-signature fallback only for unresolved records. The Durham
+notebook disables the broadest fallback but keeps the indexed variant passes,
+which handle common component differences without a cross join.
 
 Run it with:
 

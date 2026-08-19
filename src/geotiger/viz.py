@@ -2,8 +2,55 @@
 
 from __future__ import annotations
 
+from html import escape
+from numbers import Real
+
 import folium
 import pandas as pd
+
+
+def _display_text(value) -> str:
+    """Format a nullable scalar for an analyst-facing popup."""
+
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, Real) and float(value).is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _first_text(row: pd.Series, *columns: str) -> str:
+    for column in columns:
+        if column in row.index:
+            value = _display_text(row.get(column))
+            if value:
+                return value
+    return ""
+
+
+def _matched_address(row: pd.Series) -> str:
+    """Build a full one-line address from matched and input components."""
+
+    house_number = _first_text(row, "matched_house_number")
+    street = _first_text(
+        row,
+        "matched_street_norm",
+        "matched_intersection_key",
+        "street_norm",
+        "raw_address",
+    ).replace(" || ", " & ")
+    address_line = " ".join(value for value in (house_number, street) if value)
+    city = _first_text(row, "matched_city", "city", "city_parsed")
+    state = _first_text(row, "matched_state", "state", "state_parsed")
+    zip5 = _first_text(row, "matched_zip5", "zip5", "zip", "zip5_parsed")
+    state_zip = " ".join(value for value in (state, zip5) if value)
+    locality = ", ".join(value for value in (city, state_zip) if value)
+    return ", ".join(value for value in (address_line, locality) if value)
 
 
 def matches_map(
@@ -29,15 +76,16 @@ def matches_map(
     colors = {"matched": "green", "review": "orange", "unmatched": "red"}
     for _, row in valid.iterrows():
         status = str(row.get(color_by, "matched"))
+        popup_values = (
+            ("Address", _matched_address(row)),
+            ("Status", _first_text(row, "match_status")),
+            ("Score", _first_text(row, "score")),
+            ("Method", _first_text(row, "match_method")),
+        )
         popup = "<br>".join(
-            f"<b>{label}</b>: {row.get(column, '')}"
-            for label, column in (
-                ("Status", "match_status"),
-                ("Score", "score"),
-                ("Address", "matched_street_norm"),
-                ("ZIP", "matched_zip5"),
-            )
-            if column in row.index
+            f"<b>{escape(label)}</b>: {escape(value)}"
+            for label, value in popup_values
+            if value
         )
         folium.CircleMarker(
             location=[float(row.match_latitude), float(row.match_longitude)],

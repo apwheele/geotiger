@@ -310,6 +310,8 @@ def _prepare_point_table(
                 "post_directional": parsed.post_directional,
                 "street_norm": parsed.street_norm,
                 "street_block": parsed.street_block,
+                "street_name_key": parsed.street_name_key,
+                "street_name_phonetic": parsed.street_name_phonetic,
                 "city": normalize_text(parsed.city),
                 "city_norm": parsed.city_norm,
                 "state": normalize_state(parsed.state),
@@ -327,6 +329,8 @@ def _prepare_point_table(
                 "intersection_key": parsed.intersection_key,
                 "intersection_street_norm": parsed.intersection_street_norm,
                 "intersection_street_block": parsed.intersection_street_block,
+                "intersection_match_key": parsed.intersection_match_key,
+                "intersection_phonetic_key": parsed.intersection_phonetic_key,
             }
         )
     if not output:

@@ -45,7 +45,14 @@ packages = ["src/geotiger"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --cov=geotiger --cov-branch --cov-report=term-missing --cov-fail-under=80"
+
+[tool.coverage.run]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 line-length = 100

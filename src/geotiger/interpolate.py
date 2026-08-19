@@ -23,6 +23,8 @@ from .normalize import (
     normalize_zip,
     parse_address,
     street_block_key,
+    street_name_key,
+    street_name_phonetic_key,
 )
 from .schema import ADDRESS_COLUMNS, normalize_source_type
 from .state_plane import state_plane_crs
@@ -259,6 +261,8 @@ def _prepare_intersection_rows(
             {
                 "street_norm": parsed.street_norm,
                 "street_block": parsed.street_block,
+                "street_name_key": parsed.street_name_key,
+                "street_name_phonetic": parsed.street_name_phonetic,
                 "pre_directional": parsed.pre_directional,
                 "street_name": parsed.street_name,
                 "street_suffix": parsed.street_suffix,
@@ -289,6 +293,12 @@ def _prepare_intersection_rows(
             continue
         for point in _intersection_points(line_left.intersection(line_right)):
             key = intersection_key(left_meta["street_norm"], right_meta["street_norm"])
+            match_key = intersection_key(
+                left_meta["street_name_key"], right_meta["street_name_key"]
+            )
+            phonetic_key = intersection_key(
+                left_meta["street_name_phonetic"], right_meta["street_name_phonetic"]
+            )
             x_key, y_key = round(float(point.x), 2), round(float(point.y), 2)
             dedupe_key = (key, left_meta.get("state", ""), x_key, y_key)
             if dedupe_key in seen:
@@ -312,6 +322,8 @@ def _prepare_intersection_rows(
                     "post_directional": first["post_directional"],
                     "street_norm": key,
                     "street_block": first["street_block"],
+                    "street_name_key": first["street_name_key"],
+                    "street_name_phonetic": first["street_name_phonetic"],
                     "city": first["city"] or second["city"],
                     "city_norm": first["city"] or second["city"],
                     "state": first["state"] or second["state"],
@@ -329,6 +341,8 @@ def _prepare_intersection_rows(
                     "intersection_key": key,
                     "intersection_street_norm": second["street_norm"],
                     "intersection_street_block": second["street_block"],
+                    "intersection_match_key": match_key,
+                    "intersection_phonetic_key": phonetic_key,
                 }
             )
     return output
@@ -463,6 +477,12 @@ def prepare_ranges(
                 "post_directional": post,
                 "street_norm": street_norm,
                 "street_block": street_block_key(street_name),
+                "street_name_key": street_name_key(street_name, suffix, state_value),
+                "street_name_phonetic": street_name_phonetic_key(
+                    street_name,
+                    suffix,
+                    state_value,
+                ),
                 "city": city,
                 "city_norm": city,
                 "state": state_value,
@@ -477,6 +497,8 @@ def prepare_ranges(
                 "intersection_key": "",
                 "intersection_street_norm": "",
                 "intersection_street_block": "",
+                "intersection_match_key": "",
+                "intersection_phonetic_key": "",
             }
             output_columns["address_id"].extend(
                 f"{source}:{range_id}:{side}:{house_number}" for house_number in numbers

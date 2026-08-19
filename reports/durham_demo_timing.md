@@ -11,42 +11,43 @@ TIGER/Line ranges on the development workstation.
 | Interpolation CRS | EPSG:2264 |
 | Interpolation offsets | 0 m end / 0 m side |
 | DuckDB threads | 4 |
-| Candidate rows | 286,305 |
-| Automatic matches | 116,649 |
-| Review | 10 |
-| Unmatched | 18,429 |
+| Candidate rows | 311,243 |
+| Automatic matches | 126,061 |
+| Review | 302 |
+| Unmatched | 8,725 |
 
 | Phase | Seconds |
 | --- | ---: |
-| TIGER preparation with intersections (fresh, vectorized) | 25.784 |
-| Input parsing (per-run normalization cache) | 4.179 |
-| DuckDB candidate query | 8.344 |
-| Fuzzy scoring | 0.160 |
-| Aggregation | 0.517 |
-| Geocoding total | 13.930 |
+| TIGER preparation with intersections (fresh, vectorized) | 28.333 |
+| Input parsing (deduplicated) | 1.926 |
+| DuckDB candidate query | 2.185 |
+| Component-aware fuzzy scoring | 0.898 |
+| Aggregation | 0.592 |
+| Geocoding total | 6.449 |
 
-The geocoding pass processed **9,698 input rows/second**. Blocking partitions
-intersection inputs from ordinary addresses: intersections use one exact,
-order-independent `intersection_key` join, while ordinary addresses use the
-exact-street and house-number-tolerance passes. The run used exact
-normalized-street matching with house-number tolerance and disabled the broad
-street-prefix fallback (`street_fallback=False`) because the Durham public
-addresses are standardized block addresses. A per-run normalization cache
-avoids reparsing repeated address/locality combinations. The one-time TIGER
-expansion is separate from the geocoding run and is cached locally afterward.
-The vectorized preparation path reduced a fresh expansion of the same 15,799
-segments from the prior 167.445-second run to 25.784 seconds while adding 7,622
-intersection points; subsequent notebook runs load the prepared cache instead.
+The main deduplicated geocoding pass processed **20,947 input rows/second**.
+Blocking partitions intersections from ordinary addresses and tries exact,
+spacing, canonical-name/route, and phonetic keys in progressively broader
+indexed passes. The broad street-signature fallback remains disabled. Street
+name, suffix, and directional components are scored separately, and
+`match_method` identifies the pass that supplied each candidate.
+
+With `deduplicate_inputs=True`, repeated address/locality combinations are
+parsed and queried once, then expanded back to every original input row. The
+one-time TIGER expansion is separate from geocoding and is cached locally
+afterward. A fresh expansion of the same 15,799 segments took 28.333 seconds,
+produced 1,550,226 rows including 7,622 intersections, and populated all
+canonical and phonetic keys.
 
 ## Repeated-input benchmark
 
-On the same 135,088-row input, both modes returned 116,649 matches, 10 review
-rows, and 18,429 unmatched rows:
+On the same 135,088-row input, both modes returned 126,061 matches, 302 review
+rows, and 8,725 unmatched rows:
 
-| Mode | Candidate-query inputs | Candidate query | Total geocode | Throughput |
-| --- | ---: | ---: | ---: | ---: |
-| Normal | 135,088 | 6.996 s | 15.687 s | 8,612/s |
-| `deduplicate_inputs=True` | 12,841 | 1.277 s | 6.808 s | 19,844/s |
+| Mode | Candidate-query inputs | Parse | Candidate query | Total geocode | Throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Normal | 135,088 | 4.928 s | 9.906 s | 17.076 s | 7,911/s |
+| `deduplicate_inputs=True` | 12,841 | 1.926 s | 2.185 s | 6.449 s | 20,947/s |
 
 The intersection-only join now reads the separate `address_intersections`
 table. This is more useful for the bulk hash join than a conventional index on

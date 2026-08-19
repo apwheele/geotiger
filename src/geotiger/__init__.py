@@ -7,9 +7,12 @@ from .normalize import (
     ParsedAddress,
     intersection_key,
     normalize_state,
+    normalize_street_name,
     normalize_text,
     parse_address,
     street_block_key,
+    street_name_key,
+    street_name_phonetic_key,
 )
 from .prepare import prepare_addresses, prepare_combined, prepare_parcels, save_prepared
 from .sources import download_tiger_ranges, load_ranges, save_ranges
@@ -34,6 +37,7 @@ __all__ = [
     "normalize_text",
     "intersection_key",
     "normalize_state",
+    "normalize_street_name",
     "parse_address",
     "prepare_ranges",
     "prepare_addresses",
@@ -43,4 +47,6 @@ __all__ = [
     "save_ranges",
     "state_plane_crs",
     "street_block_key",
+    "street_name_key",
+    "street_name_phonetic_key",
 ]

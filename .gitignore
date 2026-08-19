@@ -2,6 +2,10 @@
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.ipynb_checkpoints/
+.coverage
+coverage.xml
+htmlcov/
 *.py[cod]
 *.duckdb
 *.duckdb.wal

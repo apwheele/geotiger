@@ -10,13 +10,60 @@ from typing import Any
 import duckdb
 import pandas as pd
 
-from .normalize import normalize_state, normalize_text, normalize_zip
+from .normalize import (
+    intersection_key,
+    normalize_state,
+    normalize_text,
+    normalize_zip,
+    parse_address,
+    street_name_key,
+    street_name_phonetic_key,
+)
 from .schema import (
     ADDRESS_COLUMNS,
     address_cache_key,
     normalize_source_type,
     source_priority,
 )
+
+
+def _deduplicate_candidate_inputs(
+    frame: pd.DataFrame,
+    key_columns: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Query one representative per repeated block while preserving outputs."""
+
+    if not len(frame) or not frame.duplicated(key_columns).any():
+        return frame, None
+    representatives = frame.drop_duplicates(key_columns, keep="first").copy()
+    mapping = frame[key_columns + ["input_id"]].rename(
+        columns={"input_id": "original_input_id"}
+    ).merge(
+        representatives[key_columns + ["input_id"]].rename(
+            columns={"input_id": "representative_input_id"}
+        ),
+        on=key_columns,
+        how="left",
+        validate="many_to_one",
+    )
+    return representatives, mapping[["representative_input_id", "original_input_id"]]
+
+
+def _expand_candidate_inputs(
+    candidates: pd.DataFrame,
+    mapping: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Expand internally deduplicated candidate rows to original input IDs."""
+
+    if mapping is None or not len(candidates):
+        return candidates
+    expanded = candidates.rename(columns={"input_id": "representative_input_id"}).merge(
+        mapping,
+        on="representative_input_id",
+        how="inner",
+    )
+    expanded["input_id"] = expanded["original_input_id"]
+    return expanded.drop(columns=["representative_input_id", "original_input_id"])
 
 
 class GeoTIGERStore:
@@ -27,6 +74,7 @@ class GeoTIGERStore:
         self.threads = max(1, threads or (os.cpu_count() or 1))
         self._connection: duckdb.DuckDBPyConnection | None = None
         self._intersection_table_initialized = False
+        self._street_keys_initialized = False
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
@@ -52,6 +100,8 @@ class GeoTIGERStore:
                 post_directional VARCHAR,
                 street_norm VARCHAR,
                 street_block VARCHAR,
+                street_name_key VARCHAR,
+                street_name_phonetic VARCHAR,
                 city VARCHAR,
                 city_norm VARCHAR,
                 state VARCHAR,
@@ -68,7 +118,9 @@ class GeoTIGERStore:
                 is_intersection BOOLEAN,
                 intersection_key VARCHAR,
                 intersection_street_norm VARCHAR,
-                intersection_street_block VARCHAR
+                intersection_street_block VARCHAR,
+                intersection_match_key VARCHAR,
+                intersection_phonetic_key VARCHAR
             )
             """
         )
@@ -127,10 +179,14 @@ class GeoTIGERStore:
             "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS source_record_id VARCHAR"
         )
         for column, definition in (
+            ("street_name_key", "VARCHAR"),
+            ("street_name_phonetic", "VARCHAR"),
             ("is_intersection", "BOOLEAN"),
             ("intersection_key", "VARCHAR"),
             ("intersection_street_norm", "VARCHAR"),
             ("intersection_street_block", "VARCHAR"),
+            ("intersection_match_key", "VARCHAR"),
+            ("intersection_phonetic_key", "VARCHAR"),
         ):
             self.connection.execute(
                 f"ALTER TABLE addresses ADD COLUMN IF NOT EXISTS {column} {definition}"
@@ -139,16 +195,28 @@ class GeoTIGERStore:
             "CREATE TABLE IF NOT EXISTS address_intersections AS "
             "SELECT * FROM addresses WHERE FALSE"
         )
+        for column, definition in (
+            ("street_name_key", "VARCHAR"),
+            ("street_name_phonetic", "VARCHAR"),
+            ("intersection_match_key", "VARCHAR"),
+            ("intersection_phonetic_key", "VARCHAR"),
+        ):
+            self.connection.execute(
+                f"ALTER TABLE address_intersections "
+                f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+            )
         if not self._intersection_table_initialized:
             if self.connection.execute(
                 "SELECT count(*) FROM address_intersections"
             ).fetchone()[0] == 0:
                 self.connection.execute(
-                    "INSERT INTO address_intersections SELECT "
+                    "INSERT INTO address_intersections "
+                    f"({', '.join(ADDRESS_COLUMNS)}) SELECT "
                     f"{', '.join(ADDRESS_COLUMNS)} FROM addresses "
                     "WHERE is_intersection IS TRUE"
                 )
             self._intersection_table_initialized = True
+        self._backfill_street_keys()
         self.connection.execute(
             """
             UPDATE addresses
@@ -177,8 +245,14 @@ class GeoTIGERStore:
             "CREATE INDEX IF NOT EXISTS addresses_state_city ON addresses(state_norm, city_norm)",
             "CREATE INDEX IF NOT EXISTS addresses_house_number ON addresses(house_number)",
             "CREATE INDEX IF NOT EXISTS addresses_street_block ON addresses(street_block)",
+            "CREATE INDEX IF NOT EXISTS addresses_street_name_key ON "
+            "addresses(street_name_key)",
+            "CREATE INDEX IF NOT EXISTS addresses_street_name_phonetic ON "
+            "addresses(street_name_phonetic)",
             "CREATE INDEX IF NOT EXISTS addresses_intersection_key ON "
             "addresses(intersection_key)",
+            "CREATE INDEX IF NOT EXISTS addresses_intersection_match_key ON "
+            "addresses(intersection_match_key)",
             "CREATE INDEX IF NOT EXISTS address_intersections_key ON "
             "address_intersections(intersection_key)",
             "CREATE INDEX IF NOT EXISTS lookup_norm_locality ON "
@@ -192,6 +266,93 @@ class GeoTIGERStore:
                 # blocking query remains correct without these advisory indexes.
                 pass
         return self
+
+    def _backfill_street_keys(self) -> None:
+        """Populate match keys when opening databases made by older releases."""
+
+        if self._street_keys_initialized:
+            return
+        for table in ("addresses", "address_intersections"):
+            missing = self.connection.execute(
+                f"""
+                SELECT DISTINCT
+                    coalesce(pre_directional, '') AS pre_directional,
+                    coalesce(street_name, '') AS street_name,
+                    coalesce(street_suffix, '') AS street_suffix,
+                    coalesce(post_directional, '') AS post_directional,
+                    coalesce(state_norm, '') AS state_norm,
+                    coalesce(intersection_street_norm, '') AS intersection_street_norm,
+                    coalesce(is_intersection, FALSE) AS is_intersection
+                FROM {table}
+                WHERE street_name_key IS NULL
+                   OR street_name_phonetic IS NULL
+                   OR intersection_match_key IS NULL
+                   OR intersection_phonetic_key IS NULL
+                """
+            ).df()
+            if not len(missing):
+                continue
+            key_rows: list[dict[str, Any]] = []
+            for row in missing.itertuples(index=False):
+                name_key = street_name_key(
+                    row.street_name,
+                    row.street_suffix,
+                    row.state_norm,
+                )
+                phonetic = street_name_phonetic_key(
+                    row.street_name,
+                    row.street_suffix,
+                    row.state_norm,
+                )
+                match_key = ""
+                intersection_phonetic = ""
+                if row.is_intersection and row.intersection_street_norm:
+                    second = parse_address(f"1 {row.intersection_street_norm}")
+                    match_key = intersection_key(name_key, second.street_name_key)
+                    intersection_phonetic = intersection_key(
+                        phonetic,
+                        second.street_name_phonetic,
+                    )
+                key_rows.append(
+                    {
+                        "pre_directional": row.pre_directional,
+                        "street_name": row.street_name,
+                        "street_suffix": row.street_suffix,
+                        "post_directional": row.post_directional,
+                        "state_norm": row.state_norm,
+                        "intersection_street_norm": row.intersection_street_norm,
+                        "is_intersection": bool(row.is_intersection),
+                        "street_name_key_value": name_key,
+                        "street_name_phonetic_value": phonetic,
+                        "intersection_match_key_value": match_key,
+                        "intersection_phonetic_key_value": intersection_phonetic,
+                    }
+                )
+            keys = pd.DataFrame(key_rows)
+            view = f"_geotiger_street_keys_{uuid.uuid4().hex}"
+            self.connection.register(view, keys)
+            try:
+                self.connection.execute(
+                    f"""
+                    UPDATE {table} AS a
+                    SET street_name_key = k.street_name_key_value,
+                        street_name_phonetic = k.street_name_phonetic_value,
+                        intersection_match_key = k.intersection_match_key_value,
+                        intersection_phonetic_key = k.intersection_phonetic_key_value
+                    FROM {view} AS k
+                    WHERE coalesce(a.pre_directional, '') = k.pre_directional
+                      AND coalesce(a.street_name, '') = k.street_name
+                      AND coalesce(a.street_suffix, '') = k.street_suffix
+                      AND coalesce(a.post_directional, '') = k.post_directional
+                      AND coalesce(a.state_norm, '') = k.state_norm
+                      AND coalesce(a.intersection_street_norm, '') =
+                          k.intersection_street_norm
+                      AND coalesce(a.is_intersection, FALSE) = k.is_intersection
+                    """
+                )
+            finally:
+                self.connection.unregister(view)
+        self._street_keys_initialized = True
 
     def close(self) -> None:
         if self._connection is not None:
@@ -462,6 +623,8 @@ class GeoTIGERStore:
                 a.street_name AS candidate_street_name,
                 a.street_suffix AS candidate_street_suffix,
                 a.post_directional AS candidate_post_directional,
+                a.street_name_key AS candidate_street_name_key,
+                a.street_name_phonetic AS candidate_street_name_phonetic,
                 a.street_norm AS candidate_street_norm,
                 a.city AS candidate_city,
                 a.city_norm AS candidate_city_norm,
@@ -478,6 +641,8 @@ class GeoTIGERStore:
                 coalesce(a.is_intersection, FALSE) AS candidate_is_intersection,
                 a.intersection_key AS candidate_intersection_key,
                 a.intersection_street_norm AS candidate_intersection_street_norm,
+                a.intersection_match_key AS candidate_intersection_match_key,
+                a.intersection_phonetic_key AS candidate_intersection_phonetic_key,
                 l.lookup_id AS candidate_lookup_id,
                 NULL::VARCHAR AS candidate_cache_key,
                 100.0::DOUBLE AS candidate_score_override,
@@ -524,6 +689,8 @@ class GeoTIGERStore:
                 a.street_name AS candidate_street_name,
                 a.street_suffix AS candidate_street_suffix,
                 a.post_directional AS candidate_post_directional,
+                a.street_name_key AS candidate_street_name_key,
+                a.street_name_phonetic AS candidate_street_name_phonetic,
                 a.street_norm AS candidate_street_norm,
                 a.city AS candidate_city,
                 a.city_norm AS candidate_city_norm,
@@ -540,6 +707,8 @@ class GeoTIGERStore:
                 coalesce(a.is_intersection, FALSE) AS candidate_is_intersection,
                 a.intersection_key AS candidate_intersection_key,
                 a.intersection_street_norm AS candidate_intersection_street_norm,
+                a.intersection_match_key AS candidate_intersection_match_key,
+                a.intersection_phonetic_key AS candidate_intersection_phonetic_key,
                 NULL::VARCHAR AS candidate_lookup_id,
                 h.cache_key AS candidate_cache_key,
                 100.0::DOUBLE AS candidate_score_override,
@@ -599,7 +768,10 @@ class GeoTIGERStore:
                 "addresses_state_city",
                 "addresses_house_number",
                 "addresses_street_block",
+                "addresses_street_name_key",
+                "addresses_street_name_phonetic",
                 "addresses_intersection_key",
+                "addresses_intersection_match_key",
                 "address_intersections_key",
             ):
                 try:
@@ -612,15 +784,19 @@ class GeoTIGERStore:
         self.connection.register(view, frame)
         try:
             self.connection.execute(
-                f"INSERT INTO addresses SELECT {', '.join(ADDRESS_COLUMNS)} FROM {view}"
+                f"INSERT INTO addresses ({', '.join(ADDRESS_COLUMNS)}) "
+                f"SELECT {', '.join(ADDRESS_COLUMNS)} FROM {view}"
             )
             self.connection.execute(
-                "INSERT INTO address_intersections SELECT "
+                "INSERT INTO address_intersections "
+                f"({', '.join(ADDRESS_COLUMNS)}) SELECT "
                 f"{', '.join(ADDRESS_COLUMNS)} FROM {view} "
                 "WHERE is_intersection IS TRUE"
             )
         finally:
             self.connection.unregister(view)
+        self._street_keys_initialized = False
+        self._backfill_street_keys()
         if replace:
             self.create()
         return len(frame)
@@ -636,7 +812,12 @@ class GeoTIGERStore:
         exact_house_number_first: bool = True,
         exact_street: bool = False,
         compact_street: bool = False,
+        name_key_street: bool = False,
+        phonetic_street: bool = False,
         street_fallback: bool = True,
+        street_variant_fallback: bool = True,
+        intersection_variant: bool = False,
+        intersection_phonetic: bool = False,
         _intersection_only: bool = False,
     ) -> pd.DataFrame:
         """Return blocked candidates for parsed input records.
@@ -654,11 +835,12 @@ class GeoTIGERStore:
                     house_number_tolerance=house_number_tolerance,
                     street_blocking=street_blocking,
                     strict_locality=strict_locality,
-                    exact_street_first=False,
+                    exact_street_first=True,
                     exact_house_number_first=False,
-                    exact_street=True,
+                    exact_street=False,
                     compact_street=False,
                     street_fallback=False,
+                    street_variant_fallback=street_variant_fallback,
                     _intersection_only=True,
                 )
                 ordinary_inputs = inputs.loc[~intersection_mask]
@@ -674,6 +856,7 @@ class GeoTIGERStore:
                     exact_street=exact_street,
                     compact_street=compact_street,
                     street_fallback=street_fallback,
+                    street_variant_fallback=street_variant_fallback,
                 )
                 candidate_frames = [
                     candidate_frame
@@ -686,10 +869,19 @@ class GeoTIGERStore:
                     else pd.DataFrame()
                 )
         if _intersection_only:
-            exact_street_first = False
             exact_house_number_first = False
-        if exact_street_first and not exact_street:
-            eligible = inputs.loc[inputs["street_norm"].fillna("").ne("")]
+        matching_mode = any(
+            (
+                exact_street,
+                name_key_street,
+                phonetic_street,
+                intersection_variant,
+                intersection_phonetic,
+            )
+        )
+        if exact_street_first and not matching_mode:
+            eligibility_column = "intersection_key" if _intersection_only else "street_norm"
+            eligible = inputs.loc[inputs[eligibility_column].fillna("").ne("")]
             exact = self.candidate_query(
                 eligible,
                 house_number_tolerance=house_number_tolerance,
@@ -699,11 +891,13 @@ class GeoTIGERStore:
                 exact_house_number_first=exact_house_number_first,
                 exact_street=True,
                 compact_street=False,
+                street_variant_fallback=street_variant_fallback,
+                _intersection_only=_intersection_only,
             )
             found = set(exact["input_id"].tolist()) if len(exact) else set()
             remaining = inputs.loc[~inputs["input_id"].isin(found)]
             compact = pd.DataFrame()
-            if len(remaining):
+            if len(remaining) and not _intersection_only:
                 compact = self.candidate_query(
                     remaining,
                     house_number_tolerance=house_number_tolerance,
@@ -714,15 +908,86 @@ class GeoTIGERStore:
                     exact_street=True,
                     compact_street=True,
                     street_fallback=False,
+                    street_variant_fallback=street_variant_fallback,
                 )
                 compact_found = set(compact["input_id"].tolist()) if len(compact) else set()
                 remaining = remaining.loc[~remaining["input_id"].isin(compact_found)]
+            variant = pd.DataFrame()
+            if len(remaining) and street_variant_fallback:
+                variant_keys = [
+                    "house_number",
+                    "state_norm",
+                    "city_norm",
+                    "zip5",
+                    "is_intersection",
+                    (
+                        "intersection_match_key"
+                        if _intersection_only
+                        else "street_name_key"
+                    ),
+                ]
+                variant_inputs, variant_mapping = _deduplicate_candidate_inputs(
+                    remaining,
+                    variant_keys,
+                )
+                variant = self.candidate_query(
+                    variant_inputs,
+                    house_number_tolerance=house_number_tolerance,
+                    street_blocking=street_blocking,
+                    strict_locality=strict_locality,
+                    exact_street_first=False,
+                    exact_house_number_first=exact_house_number_first,
+                    name_key_street=not _intersection_only,
+                    intersection_variant=_intersection_only,
+                    street_fallback=False,
+                    street_variant_fallback=street_variant_fallback,
+                    _intersection_only=_intersection_only,
+                )
+                variant = _expand_candidate_inputs(variant, variant_mapping)
+                variant_found = set(variant["input_id"].tolist()) if len(variant) else set()
+                remaining = remaining.loc[~remaining["input_id"].isin(variant_found)]
+            phonetic = pd.DataFrame()
+            if len(remaining) and street_variant_fallback:
+                phonetic_keys = [
+                    "house_number",
+                    "state_norm",
+                    "city_norm",
+                    "zip5",
+                    "is_intersection",
+                    (
+                        "intersection_phonetic_key"
+                        if _intersection_only
+                        else "street_name_phonetic"
+                    ),
+                ]
+                phonetic_inputs, phonetic_mapping = _deduplicate_candidate_inputs(
+                    remaining,
+                    phonetic_keys,
+                )
+                phonetic = self.candidate_query(
+                    phonetic_inputs,
+                    house_number_tolerance=house_number_tolerance,
+                    street_blocking=street_blocking,
+                    strict_locality=strict_locality,
+                    exact_street_first=False,
+                    exact_house_number_first=exact_house_number_first,
+                    phonetic_street=not _intersection_only,
+                    intersection_phonetic=_intersection_only,
+                    street_fallback=False,
+                    street_variant_fallback=street_variant_fallback,
+                    _intersection_only=_intersection_only,
+                )
+                phonetic = _expand_candidate_inputs(phonetic, phonetic_mapping)
+                phonetic_found = (
+                    set(phonetic["input_id"].tolist()) if len(phonetic) else set()
+                )
+                remaining = remaining.loc[~remaining["input_id"].isin(phonetic_found)]
             exact_frames = [
                 candidate_frame
-                for candidate_frame in (exact, compact)
+                for candidate_frame in (exact, compact, variant, phonetic)
                 if len(candidate_frame)
             ]
-            if not len(remaining) or not street_fallback:
+            if not len(remaining) or not street_fallback or _intersection_only:
                 return (
                     pd.concat(exact_frames, ignore_index=True)
                     if exact_frames
@@ -737,6 +1002,7 @@ class GeoTIGERStore:
                 exact_house_number_first=exact_house_number_first,
                 exact_street=False,
                 street_fallback=street_fallback,
+                street_variant_fallback=street_variant_fallback,
             )
             return pd.concat([*exact_frames, fallback], ignore_index=True)
         if exact_house_number_first and house_number_tolerance > 0:
@@ -749,6 +1015,12 @@ class GeoTIGERStore:
                 exact_house_number_first=False,
                 exact_street=exact_street,
                 compact_street=compact_street,
+                name_key_street=name_key_street,
+                phonetic_street=phonetic_street,
+                intersection_variant=intersection_variant,
+                intersection_phonetic=intersection_phonetic,
+                street_variant_fallback=street_variant_fallback,
+                _intersection_only=_intersection_only,
             )
             found = set(exact["input_id"].tolist()) if len(exact) else set()
             remaining = inputs.loc[~inputs["input_id"].isin(found)]
@@ -763,6 +1035,12 @@ class GeoTIGERStore:
                 exact_house_number_first=False,
                 exact_street=exact_street,
                 compact_street=compact_street,
+                name_key_street=name_key_street,
+                phonetic_street=phonetic_street,
+                intersection_variant=intersection_variant,
+                intersection_phonetic=intersection_phonetic,
+                street_variant_fallback=street_variant_fallback,
+                _intersection_only=_intersection_only,
             )
             return pd.concat([exact, fallback], ignore_index=True)
         required = [
@@ -770,11 +1048,15 @@ class GeoTIGERStore:
             "house_number",
             "street_norm",
             "street_block",
+            "street_name_key",
+            "street_name_phonetic",
             "state_norm",
             "city_norm",
             "zip5",
             "is_intersection",
             "intersection_key",
+            "intersection_match_key",
+            "intersection_phonetic_key",
         ]
         missing = [column for column in required if column not in inputs.columns]
         if missing:
@@ -782,18 +1064,31 @@ class GeoTIGERStore:
         frame = inputs[required].copy()
         frame["house_number"] = frame["house_number"].astype("Int64")
         frame["is_intersection"] = frame["is_intersection"].fillna(False).astype(bool)
-        for column in ("street_block", "state_norm", "city_norm", "zip5", "intersection_key"):
+        for column in (
+            "street_block",
+            "street_name_key",
+            "street_name_phonetic",
+            "state_norm",
+            "city_norm",
+            "zip5",
+            "intersection_key",
+            "intersection_match_key",
+            "intersection_phonetic_key",
+        ):
             frame[column] = frame[column].fillna("").astype(str)
         view = f"_geotiger_inputs_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
         conditions = []
         if _intersection_only:
-            conditions.extend(
-                [
-                    "a.is_intersection IS TRUE",
-                    "a.intersection_key = i.intersection_key",
-                ]
-            )
+            conditions.append("a.is_intersection IS TRUE")
+            if intersection_variant:
+                conditions.append("a.intersection_match_key = i.intersection_match_key")
+            elif intersection_phonetic:
+                conditions.append(
+                    "a.intersection_phonetic_key = i.intersection_phonetic_key"
+                )
+            else:
+                conditions.append("a.intersection_key = i.intersection_key")
         else:
             conditions.append("a.is_intersection IS NOT TRUE")
         for column in ("state_norm",):
@@ -802,7 +1097,11 @@ class GeoTIGERStore:
             else:
                 conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
         if not _intersection_only:
-            if exact_street:
+            if name_key_street:
+                conditions.append("a.street_name_key = i.street_name_key")
+            elif phonetic_street:
+                conditions.append("a.street_name_phonetic = i.street_name_phonetic")
+            elif exact_street:
                 if compact_street:
                     # Treat spacing-only variants such as ``SNOWCREST TRL``
                     # and ``SNOW CREST TRL`` as the same normalized street.
@@ -832,6 +1131,22 @@ class GeoTIGERStore:
             )
         join_where = " AND ".join(conditions) or "TRUE"
         reference_table = "address_intersections" if _intersection_only else "addresses"
+        if intersection_phonetic:
+            match_method = "intersection_phonetic"
+        elif intersection_variant:
+            match_method = "intersection_canonical"
+        elif _intersection_only:
+            match_method = "intersection_exact"
+        elif phonetic_street:
+            match_method = "street_phonetic"
+        elif name_key_street:
+            match_method = "street_canonical"
+        elif compact_street:
+            match_method = "street_spacing"
+        elif exact_street:
+            match_method = "street_exact"
+        else:
+            match_method = "street_block"
         query = f"""
             SELECT
                 i.input_id,
@@ -844,6 +1159,8 @@ class GeoTIGERStore:
                 a.street_name AS candidate_street_name,
                 a.street_suffix AS candidate_street_suffix,
                 a.post_directional AS candidate_post_directional,
+                a.street_name_key AS candidate_street_name_key,
+                a.street_name_phonetic AS candidate_street_name_phonetic,
                 a.street_norm AS candidate_street_norm,
                 a.city AS candidate_city,
                 a.city_norm AS candidate_city_norm,
@@ -860,10 +1177,12 @@ class GeoTIGERStore:
                 coalesce(a.is_intersection, FALSE) AS candidate_is_intersection,
                 a.intersection_key AS candidate_intersection_key,
                 a.intersection_street_norm AS candidate_intersection_street_norm,
+                a.intersection_match_key AS candidate_intersection_match_key,
+                a.intersection_phonetic_key AS candidate_intersection_phonetic_key,
                 NULL::VARCHAR AS candidate_lookup_id,
                 NULL::VARCHAR AS candidate_cache_key,
                 NULL::DOUBLE AS candidate_score_override,
-                'candidate'::VARCHAR AS candidate_match_method
+                '{match_method}'::VARCHAR AS candidate_match_method
             FROM {view} i
             INNER JOIN {reference_table} a
               ON {join_where}

@@ -3,7 +3,7 @@ from conftest import make_range_frame, make_store
 from shapely.geometry import LineString
 
 from geotiger import Geocoder, GeocoderConfig, InterpolationConfig, prepare_ranges
-from geotiger.geocoder import DEFAULT_WEIGHTS
+from geotiger.geocoder import DEFAULT_STREET_COMPONENT_WEIGHTS, DEFAULT_WEIGHTS
 
 
 def test_default_weights_prioritize_street_identity_over_locality_fields():
@@ -11,6 +11,13 @@ def test_default_weights_prioritize_street_identity_over_locality_fields():
     assert DEFAULT_WEIGHTS["street"] > DEFAULT_WEIGHTS["house_number"]
     assert DEFAULT_WEIGHTS["city"] <= 0.05
     assert DEFAULT_WEIGHTS["zip5"] <= 0.05
+    assert sum(DEFAULT_STREET_COMPONENT_WEIGHTS.values()) == 1.0
+    assert DEFAULT_STREET_COMPONENT_WEIGHTS["name"] > DEFAULT_STREET_COMPONENT_WEIGHTS[
+        "directional"
+    ]
+    assert DEFAULT_STREET_COMPONENT_WEIGHTS["directional"] > DEFAULT_STREET_COMPONENT_WEIGHTS[
+        "suffix"
+    ]
 
 
 def test_geocode_returns_match_and_all_potential_candidates():
@@ -110,6 +117,132 @@ def test_exact_street_mode_accepts_spacing_only_street_variants():
 
     assert result.matches.loc[0, "match_status"] == "matched"
     assert result.matches.loc[0, "score_street"] > 90
+
+
+def test_component_aware_street_variants_reach_scoring_without_broad_fallback():
+    names = [
+        "Ivy Wood Lane",
+        "Sedwick Drive",
+        "Fayetteville Road",
+        "9th Street",
+        "Mt Moriah Road",
+        "State Hwy 55",
+    ]
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges = pd.concat([ranges] * len(names), ignore_index=True)
+    ranges = ranges.set_geometry("geometry").set_crs("EPSG:4326")
+    ranges["TLID"] = [f"variant-{index}" for index in range(len(names))]
+    ranges["FULLNAME"] = names
+    store = make_store()
+    store.ingest_candidates(
+        prepare_ranges(
+            ranges,
+            config=InterpolationConfig(
+                end_offset_m=0,
+                side_offset_m=0,
+                include_intersections=False,
+            ),
+            source="variants",
+        ),
+        replace=True,
+    )
+    records = pd.DataFrame(
+        {
+            "address": [
+                "100 Ivey Wood Ln",
+                "100 Sedwick Rd",
+                "100 Fayetteville St",
+                "100 Ninth St",
+                "100 Mount Moriah Rd",
+                "100 NC 55 Hwy",
+            ],
+            "state": "NC",
+        }
+    )
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(records, city_column=None, zip_column=None)
+
+    assert result.matches["match_status"].eq("matched").all()
+    assert result.matches["matched_street_norm"].tolist() == [
+        "IVY WOOD LN",
+        "SEDWICK DR",
+        "FAYETTEVILLE RD",
+        "9TH ST",
+        "MT MORIAH RD",
+        "STATE HWY 55",
+    ]
+    assert result.matches.loc[1, "score_street_name"] == 100
+    assert result.matches.loc[1, "score_street_suffix"] == 0
+    assert result.matches.loc[0, "score_street_name"] < 100
+    assert result.matches["match_method"].tolist() == [
+        "street_phonetic",
+        "street_canonical",
+        "street_canonical",
+        "street_canonical",
+        "street_canonical",
+        "street_canonical",
+    ]
+
+
+def test_intersection_variants_use_canonical_component_keys():
+    ranges = make_range_frame().copy()
+    ranges.loc[0, "FULLNAME"] = "1st Avenue"
+    ranges.loc[1, "FULLNAME"] = "Mt Moriah Road"
+    ranges.loc[1, "geometry"] = LineString([(-78.945, 35.995), (-78.945, 36.005)])
+    prepared = prepare_ranges(
+        ranges,
+        config=InterpolationConfig(end_offset_m=0, side_offset_m=0),
+    )
+    store = make_store()
+    store.ingest_candidates(prepared, replace=True)
+
+    result = Geocoder(store).geocode(
+        pd.DataFrame(
+            [{"address": "First Street at Mount Moriah Rd", "state": "NC", "zip": "27514"}]
+        )
+    )
+
+    # The suffix mismatch (Street/Avenue) is soft evidence; the canonical
+    # ordinal and Mount/Mt identities still retrieve the prepared crossing.
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_is_intersection"]
+    assert result.matches.loc[0, "match_method"] == "intersection_canonical"
+
+
+def test_directional_identity_outweighs_street_suffix():
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges = pd.concat([ranges, ranges], ignore_index=True)
+    ranges = ranges.set_geometry("geometry").set_crs("EPSG:4326")
+    ranges["TLID"] = ["north-road", "south-street"]
+    ranges["FULLNAME"] = ["N Roxboro Road", "S Roxboro Street"]
+    ranges[["LFROMADD", "RFROMADD"]] = 5300
+    ranges[["LTOADD", "RTOADD"]] = 5400
+    store = make_store()
+    store.ingest_candidates(
+        prepare_ranges(
+            ranges,
+            config=InterpolationConfig(
+                end_offset_m=0,
+                side_offset_m=0,
+                include_intersections=False,
+            ),
+        ),
+        replace=True,
+    )
+
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "5350 N Roxboro St", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_street_norm"] == "N ROXBORO RD"
 
 
 def test_locality_blocking_rejects_wrong_state_and_zip():

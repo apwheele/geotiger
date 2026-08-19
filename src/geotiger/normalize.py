@@ -21,6 +21,16 @@ _NUMBER_RE = re.compile(r"^\s*(\d+)")
 _LEADING_NUMBER_RE = re.compile(r"^\s*(\d+)\s+(.*)$")
 _INTERSECTION_SEPARATOR_RE = re.compile(r"\s*(?:/|&|@|\+)\s*|\s+\b(?:AT|AND)\b\s+", re.IGNORECASE)
 _INTERSECTION_PREFIX_RE = re.compile(r"^\s*(?:INTERSECTION|CORNER)\s+OF\s+", re.IGNORECASE)
+_NUMERIC_ORDINAL_RE = re.compile(r"^(\d+)(?:ST|ND|RD|TH|NTH)$")
+_STATE_ROUTE_RE = re.compile(
+    r"^([A-Z]{2}|[A-Z] [A-Z]|STATE(?: HWY| HIGHWAY| RTE| ROUTE)?)\s*"
+    r"(\d+[A-Z]?)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$"
+)
+_US_ROUTE_RE = re.compile(
+    r"^(?:US|U S)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?\s*"
+    r"(\d+(?:\s+\d+)*)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$"
+)
+_INTERSTATE_RE = re.compile(r"^(?:I|INTERSTATE)\s*(\d+[A-Z]?)$")
 
 _DIRECTIONALS = {
     "NORTH": "N",
@@ -111,6 +121,47 @@ _STATE_ALIASES = {
     "55": "WI", "56": "WY", "11": "DC",
 }
 
+_ORDINAL_WORDS = {
+    "FIRST": "1ST",
+    "SECOND": "2ND",
+    "THIRD": "3RD",
+    "FOURTH": "4TH",
+    "FIFTH": "5TH",
+    "SIXTH": "6TH",
+    "SEVENTH": "7TH",
+    "EIGHTH": "8TH",
+    "NINTH": "9TH",
+    "TENTH": "10TH",
+    "ELEVENTH": "11TH",
+    "TWELFTH": "12TH",
+    "THIRTEENTH": "13TH",
+    "FOURTEENTH": "14TH",
+    "FIFTEENTH": "15TH",
+    "SIXTEENTH": "16TH",
+    "SEVENTEENTH": "17TH",
+    "EIGHTEENTH": "18TH",
+    "NINETEENTH": "19TH",
+    "TWENTIETH": "20TH",
+}
+
+# These are lexical abbreviations, not fuzzy corrections. They are only
+# applied to the parsed street-name component, where ``ST`` means Saint rather
+# than Street (the latter has already been separated into ``street_suffix``).
+_STREET_NAME_ALIASES = {
+    "MOUNT": "MT",
+    "SAINT": "ST",
+    "FORT": "FT",
+}
+
+_SOUNDEX_CODES = {
+    **dict.fromkeys("BFPV", "1"),
+    **dict.fromkeys("CGJKQSXZ", "2"),
+    **dict.fromkeys("DT", "3"),
+    "L": "4",
+    **dict.fromkeys("MN", "5"),
+    "R": "6",
+}
+
 
 def normalize_text(value: Any) -> str:
     """Return an uppercase, punctuation-free comparison string."""
@@ -137,6 +188,108 @@ def normalize_directional(value: Any) -> str:
 def normalize_suffix(value: Any) -> str:
     value = normalize_text(value)
     return _SUFFIXES.get(value, value)
+
+
+def _ordinal(number: int) -> str:
+    """Return a canonical numeric ordinal such as ``9TH`` or ``21ST``."""
+
+    remainder = number % 100
+    if 10 < remainder < 14:
+        suffix = "TH"
+    else:
+        suffix = {1: "ST", 2: "ND", 3: "RD"}.get(number % 10, "TH")
+    return f"{number}{suffix}"
+
+
+def normalize_street_name(value: Any) -> str:
+    """Canonicalize common, deterministic US street-name variants.
+
+    The function intentionally does not correct arbitrary spelling. It unifies
+    lexical abbreviations and ordinal forms that have a single conventional
+    representation. Approximate spelling is handled later by a phonetic block
+    and remains visible to the scorer.
+    """
+
+    tokens: list[str] = []
+    for token in normalize_text(value).split():
+        ordinal = _ORDINAL_WORDS.get(token)
+        if ordinal:
+            tokens.append(ordinal)
+            continue
+        numeric = _NUMERIC_ORDINAL_RE.match(token)
+        if numeric:
+            tokens.append(_ordinal(int(numeric.group(1))))
+            continue
+        tokens.append(_STREET_NAME_ALIASES.get(token, token))
+    return " ".join(tokens)
+
+
+def street_name_key(
+    street_name: Any,
+    street_suffix: Any = "",
+    state: Any = "",
+) -> str:
+    """Return a suffix-independent identity key for a parsed street name.
+
+    Numbered state, US, and Interstate routes receive a common key so common
+    source forms such as ``NC 55 HWY`` and ``STATE HWY 55`` can enter scoring.
+    A candidate is not accepted on this key alone: house number, locality,
+    component scores, thresholds, and score margins still apply.
+    """
+
+    name = normalize_text(street_name)
+    suffix = normalize_suffix(street_suffix)
+    route_text = normalize_text(" ".join(value for value in (name, suffix) if value))
+    for pattern, prefix in (
+        (_INTERSTATE_RE, "I"),
+        (_US_ROUTE_RE, "US"),
+    ):
+        match = pattern.match(route_text)
+        if match:
+            route_number = _SPACE_RE.sub(" ", match.group(1)).strip()
+            return f"{prefix} {route_number}"
+    state_route = _STATE_ROUTE_RE.match(route_text)
+    if state_route:
+        route_label = state_route.group(1)
+        route_number = state_route.group(2)
+        state_code = normalize_state(state)
+        if route_label.startswith("STATE"):
+            route_label = state_code or "STATE"
+        else:
+            route_label = route_label.replace(" ", "")
+            if state_code and route_label != state_code:
+                return normalize_street_name(name)
+        return f"{route_label} {route_number}"
+    return normalize_street_name(name)
+
+
+def _soundex_token(token: str) -> str:
+    """Return a compact Soundex code used only for candidate blocking."""
+
+    if not token:
+        return ""
+    if token.isdigit() or any(character.isdigit() for character in token):
+        return token
+    first = token[0]
+    previous = _SOUNDEX_CODES.get(first, "")
+    digits: list[str] = []
+    for character in token[1:]:
+        code = _SOUNDEX_CODES.get(character, "")
+        if code and code != previous:
+            digits.append(code)
+        previous = code
+    return (first + "".join(digits) + "000")[:4]
+
+
+def street_name_phonetic_key(
+    street_name: Any,
+    street_suffix: Any = "",
+    state: Any = "",
+) -> str:
+    """Return a phonetic block key for small street-name spelling variants."""
+
+    key = street_name_key(street_name, street_suffix, state)
+    return " ".join(_soundex_token(token) for token in key.split())
 
 
 def normalize_state(value: Any) -> str:
@@ -192,6 +345,8 @@ class ParsedAddress:
     is_intersection: bool = False
     intersection_street_norm: str = ""
     intersection_key: str = ""
+    intersection_street_name_key: str = ""
+    intersection_street_name_phonetic: str = ""
 
     @property
     def street_norm(self) -> str:
@@ -219,6 +374,41 @@ class ParsedAddress:
         return street_block_key(self.street_name)
 
     @property
+    def street_name_key(self) -> str:
+        """Return the canonical, suffix-independent street identity."""
+
+        return street_name_key(self.street_name, self.street_suffix, self.state_norm)
+
+    @property
+    def street_name_phonetic(self) -> str:
+        """Return the phonetic candidate-block key for the street name."""
+
+        return street_name_phonetic_key(
+            self.street_name,
+            self.street_suffix,
+            self.state_norm,
+        )
+
+    @property
+    def intersection_match_key(self) -> str:
+        """Return an order-independent canonical key for an intersection."""
+
+        if not self.is_intersection:
+            return ""
+        return intersection_key(self.street_name_key, self.intersection_street_name_key)
+
+    @property
+    def intersection_phonetic_key(self) -> str:
+        """Return an order-independent phonetic intersection key."""
+
+        if not self.is_intersection:
+            return ""
+        return intersection_key(
+            self.street_name_phonetic,
+            self.intersection_street_name_phonetic,
+        )
+
+    @property
     def intersection_street_block(self) -> str:
         """Return the compact block key for the second intersection street."""
 
@@ -231,7 +421,11 @@ class ParsedAddress:
             city_norm=self.city_norm,
             state_norm=self.state_norm,
             street_block=self.street_block,
+            street_name_key=self.street_name_key,
+            street_name_phonetic=self.street_name_phonetic,
             intersection_street_block=self.intersection_street_block,
+            intersection_match_key=self.intersection_match_key,
+            intersection_phonetic_key=self.intersection_phonetic_key,
         )
         return result
 
@@ -424,6 +618,8 @@ def parse_address(
                 zip5=resolved_zip or left_parsed.zip5,
                 is_intersection=True,
                 intersection_street_norm=right_parsed.street_norm,
+                intersection_street_name_key=right_parsed.street_name_key,
+                intersection_street_name_phonetic=right_parsed.street_name_phonetic,
                 intersection_key=intersection_key(
                     left_parsed.street_norm,
                     right_parsed.street_norm,

@@ -16,6 +16,8 @@ ADDRESS_COLUMNS = [
     "post_directional",
     "street_norm",
     "street_block",
+    "street_name_key",
+    "street_name_phonetic",
     "city",
     "city_norm",
     "state",
@@ -33,6 +35,8 @@ ADDRESS_COLUMNS = [
     "intersection_key",
     "intersection_street_norm",
     "intersection_street_block",
+    "intersection_match_key",
+    "intersection_phonetic_key",
 ]
 
 # Lower numbers are preferred when match scores are otherwise equal. The

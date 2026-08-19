@@ -26,6 +26,15 @@ DEFAULT_WEIGHTS = {
     "zip5": 0.03,
 }
 
+DEFAULT_STREET_COMPONENT_WEIGHTS = {
+    # The parsed street name carries most of the identity. Suffixes and
+    # directionals help rank otherwise plausible candidates but should not
+    # prevent ``Sedwick Rd`` from reaching ``Sedwick Dr`` for scoring.
+    "name": 0.80,
+    "suffix": 0.04,
+    "directional": 0.16,
+}
+
 
 @dataclass(frozen=True)
 class GeocoderConfig:
@@ -39,11 +48,15 @@ class GeocoderConfig:
     street_blocking: bool = True
     exact_street_first: bool = True
     street_fallback: bool = True
+    street_variant_fallback: bool = True
     strict_locality: bool = True
     use_lookup_table: bool = True
     use_history_cache: bool = True
     deduplicate_inputs: bool = False
     weights: Mapping[str, float] = field(default_factory=lambda: DEFAULT_WEIGHTS.copy())
+    street_component_weights: Mapping[str, float] = field(
+        default_factory=lambda: DEFAULT_STREET_COMPONENT_WEIGHTS.copy()
+    )
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,25 @@ def _text_similarity_batch(left: pd.Series, right: pd.Series) -> pd.Series:
     return scores
 
 
+def _component_similarity_batch(
+    left: pd.Series,
+    right: pd.Series,
+    *,
+    one_missing_score: float = 60.0,
+) -> pd.Series:
+    """Score an address component, retaining a modest missing-value penalty."""
+
+    left = left.fillna("").astype(str)
+    right = right.fillna("").astype(str)
+    either = left.ne("") | right.ne("")
+    both = left.ne("") & right.ne("")
+    scores = pd.Series(float("nan"), index=left.index, dtype=float)
+    scores.loc[either & ~both] = one_missing_score
+    if both.any():
+        scores.loc[both] = _text_similarity_batch(left.loc[both], right.loc[both])
+    return scores
+
+
 def _parse_cache_text(value: Any) -> str:
     """Convert a scalar input field into a stable per-run cache key part."""
 
@@ -210,6 +242,7 @@ def _score_candidates(
     candidates: pd.DataFrame,
     parsed_inputs: pd.DataFrame,
     weights: Mapping[str, float],
+    street_component_weights: Mapping[str, float],
 ) -> pd.DataFrame:
     """Vectorized batch scoring with RapidFuzz calls over plain Python lists.
 
@@ -225,20 +258,53 @@ def _score_candidates(
             shortcut["score"] = overrides.loc[shortcut_mask]
             for name in ("house_number", "street", "city", "state", "zip5"):
                 shortcut[f"score_{name}"] = overrides.loc[shortcut_mask]
+            for name in (
+                "street_name",
+                "street_suffix",
+                "directional",
+                "pre_directional",
+                "post_directional",
+            ):
+                shortcut[f"score_{name}"] = overrides.loc[shortcut_mask]
             if shortcut_mask.all():
                 return shortcut
-            normal = _score_candidates(candidates.loc[~shortcut_mask], parsed_inputs, weights)
+            normal = _score_candidates(
+                candidates.loc[~shortcut_mask],
+                parsed_inputs,
+                weights,
+                street_component_weights,
+            )
             return pd.concat([normal, shortcut], ignore_index=True)
 
     parsed = parsed_inputs.set_index("input_id")
     joined = candidates.join(
-        parsed[["house_number", "street_norm", "city_norm", "state_norm", "zip5"]].rename(
+        parsed[
+            [
+                "house_number",
+                "street_norm",
+                "street_name_key",
+                "street_suffix",
+                "pre_directional",
+                "post_directional",
+                "city_norm",
+                "state_norm",
+                "zip5",
+                "is_intersection",
+                "intersection_match_key",
+            ]
+        ].rename(
             columns={
                 "house_number": "input_house_number",
                 "street_norm": "input_street_norm",
+                "street_name_key": "input_street_name_key",
+                "street_suffix": "input_street_suffix",
+                "pre_directional": "input_pre_directional",
+                "post_directional": "input_post_directional",
                 "city_norm": "input_city_norm",
                 "state_norm": "input_state_norm",
                 "zip5": "input_zip5",
+                "is_intersection": "input_is_intersection",
+                "intersection_match_key": "input_intersection_match_key",
             }
         ),
         on="input_id",
@@ -251,8 +317,53 @@ def _score_candidates(
             / joined["input_house_number"].clip(lower=25)
         )
     ).clip(lower=0.0)
+    audit_street_components = (
+        ("street_name", "input_street_name_key", "candidate_street_name_key"),
+        ("street_suffix", "input_street_suffix", "candidate_street_suffix"),
+        ("pre_directional", "input_pre_directional", "candidate_pre_directional"),
+        ("post_directional", "input_post_directional", "candidate_post_directional"),
+    )
+    for name, left_column, right_column in audit_street_components:
+        joined[f"score_{name}"] = _component_similarity_batch(
+            joined[left_column], joined[right_column]
+        )
+    input_directional = joined["input_pre_directional"].where(
+        joined["input_pre_directional"].fillna("").ne(""),
+        joined["input_post_directional"],
+    )
+    candidate_directional = joined["candidate_pre_directional"].where(
+        joined["candidate_pre_directional"].fillna("").ne(""),
+        joined["candidate_post_directional"],
+    )
+    joined["score_directional"] = _component_similarity_batch(
+        input_directional,
+        candidate_directional,
+    )
+    scoring_street_components = (
+        "street_name",
+        "street_suffix",
+        "directional",
+    )
+    street_numerator = pd.Series(0.0, index=joined.index)
+    street_denominator = pd.Series(0.0, index=joined.index)
+    for name in scoring_street_components:
+        values = joined[f"score_{name}"]
+        weight = float(street_component_weights.get(name.removeprefix("street_"), 0.0))
+        available = values.notna()
+        street_numerator = street_numerator.add(values.fillna(0.0) * weight)
+        street_denominator = street_denominator.add(available.astype(float) * weight)
+    joined["score_street"] = street_numerator / street_denominator.where(
+        street_denominator.ne(0), 1.0
+    )
+    intersection_mask = joined["input_is_intersection"].fillna(False).astype(bool)
+    if intersection_mask.any():
+        intersection_scores = _text_similarity_batch(
+            joined.loc[intersection_mask, "input_intersection_match_key"],
+            joined.loc[intersection_mask, "candidate_intersection_match_key"],
+        )
+        joined.loc[intersection_mask, "score_street"] = intersection_scores
+        joined.loc[intersection_mask, "score_street_name"] = intersection_scores
     for name, left_column, right_column in (
-        ("street", "input_street_norm", "candidate_street_norm"),
         ("city", "input_city_norm", "candidate_city_norm"),
         ("state", "input_state_norm", "candidate_state_norm"),
         ("zip5", "input_zip5", "candidate_zip5"),
@@ -271,15 +382,31 @@ def _score_candidates(
         denominator = denominator.add(available.astype(float) * weight)
     joined["score"] = (numerator / denominator.where(denominator.ne(0), 1.0)).round(3)
     joined["score_house_number"] = joined["score_house_number"].fillna(0.0).round(3)
-    for name in ("street", "city", "state", "zip5"):
+    for name in (
+        "street",
+        "street_name",
+        "street_suffix",
+        "directional",
+        "pre_directional",
+        "post_directional",
+        "city",
+        "state",
+        "zip5",
+    ):
         joined[f"score_{name}"] = joined[f"score_{name}"].fillna(0.0).round(3)
     return joined.drop(
         columns=[
             "input_house_number",
             "input_street_norm",
+            "input_street_name_key",
+            "input_street_suffix",
+            "input_pre_directional",
+            "input_post_directional",
             "input_city_norm",
             "input_state_norm",
             "input_zip5",
+            "input_is_intersection",
+            "input_intersection_match_key",
         ]
     )
 
@@ -309,9 +436,39 @@ class Geocoder:
         frame["input_id"] = range(len(frame))
 
         parse_started = time.perf_counter()
+        parse_mapping = None
+        parse_source = frame
+        if self.config.deduplicate_inputs and len(frame):
+            parse_work = pd.DataFrame(
+                {
+                    "input_id": frame["input_id"],
+                    "_address": frame[address_column].map(_parse_cache_text),
+                    "_city": (
+                        frame[city_column].map(_parse_cache_text)
+                        if city_column and city_column in frame.columns
+                        else ""
+                    ),
+                    "_state": (
+                        frame[state_column].map(_parse_cache_text)
+                        if state_column and state_column in frame.columns
+                        else ""
+                    ),
+                    "_zip": (
+                        frame[zip_column].map(_parse_cache_text)
+                        if zip_column and zip_column in frame.columns
+                        else ""
+                    ),
+                }
+            )
+            parse_representatives, parse_mapping = _deduplicate_work_frame(
+                parse_work,
+                ["_address", "_city", "_state", "_zip"],
+            )
+            representative_ids = set(parse_representatives["input_id"].tolist())
+            parse_source = frame.loc[frame["input_id"].isin(representative_ids)]
         parsed_rows: list[dict[str, Any]] = []
         parsed_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-        for row in frame.to_dict(orient="records"):
+        for row in parse_source.to_dict(orient="records"):
             input_id = int(row["input_id"])
             cache_key = (
                 _parse_cache_text(row.get(address_column, "")),
@@ -348,12 +505,21 @@ class Geocoder:
                 "city_norm",
                 "state_norm",
                 "street_block",
+                "street_name_key",
+                "street_name_phonetic",
                 "is_intersection",
                 "intersection_street_norm",
                 "intersection_key",
+                "intersection_street_name_key",
+                "intersection_street_name_phonetic",
                 "intersection_street_block",
+                "intersection_match_key",
+                "intersection_phonetic_key",
             ],
         )
+        parsed_frame = _expand_work_candidates(parsed_frame, parse_mapping)
+        if parse_mapping is not None:
+            parsed_frame = parsed_frame.sort_values("input_id").reset_index(drop=True)
         parse_seconds = time.perf_counter() - parse_started
 
         parsed_frame["lookup_norm"] = parsed_frame["raw_address"].map(normalize_text)
@@ -412,11 +578,15 @@ class Geocoder:
                     "house_number",
                     "street_norm",
                     "street_block",
+                    "street_name_key",
+                    "street_name_phonetic",
                     "state_norm",
                     "city_norm",
                     "zip5",
                     "is_intersection",
                     "intersection_key",
+                    "intersection_match_key",
+                    "intersection_phonetic_key",
                 ]
             ]
             if self.config.deduplicate_inputs:
@@ -426,11 +596,15 @@ class Geocoder:
                         "house_number",
                         "street_norm",
                         "street_block",
+                        "street_name_key",
+                        "street_name_phonetic",
                         "state_norm",
                         "city_norm",
                         "zip5",
                         "is_intersection",
                         "intersection_key",
+                        "intersection_match_key",
+                        "intersection_phonetic_key",
                     ],
                 )
             candidate_query_input_count = len(query_inputs)
@@ -442,6 +616,7 @@ class Geocoder:
                 exact_street_first=self.config.exact_street_first,
                 exact_house_number_first=self.config.exact_house_number_first,
                 street_fallback=self.config.street_fallback,
+                street_variant_fallback=self.config.street_variant_fallback,
             )
             candidate_query = _expand_work_candidates(candidate_query, candidate_mapping)
         else:
@@ -460,11 +635,21 @@ class Geocoder:
 
         score_started = time.perf_counter()
         if len(candidates):
-            candidates = _score_candidates(candidates, parsed_frame, self.config.weights)
+            candidates = _score_candidates(
+                candidates,
+                parsed_frame,
+                self.config.weights,
+                self.config.street_component_weights,
+            )
         else:
             for name in (
                 "score_house_number",
                 "score_street",
+                "score_street_name",
+                "score_street_suffix",
+                "score_directional",
+                "score_pre_directional",
+                "score_post_directional",
                 "score_city",
                 "score_state",
                 "score_zip5",
@@ -611,7 +796,8 @@ class Geocoder:
                 "matched_intersection_street_norm",
                 "matched_lookup_id", "matched_cache_key", "match_method",
                 "match_status", "auto_assigned", "score_house_number", "score_street", "score_city",
-                "score_state", "score_zip5",
+                "score_state", "score_zip5", "score_street_name", "score_street_suffix",
+                "score_directional", "score_pre_directional", "score_post_directional",
             ]
             best = best[[column for column in keep if column in best.columns]]
         else:
@@ -645,6 +831,11 @@ class Geocoder:
             "match_method": "candidate",
             "score_house_number": 0.0,
             "score_street": 0.0,
+            "score_street_name": 0.0,
+            "score_street_suffix": 0.0,
+            "score_directional": 0.0,
+            "score_pre_directional": 0.0,
+            "score_post_directional": 0.0,
             "score_city": 0.0,
             "score_state": 0.0,
             "score_zip5": 0.0,
