@@ -32,7 +32,10 @@ class GeocoderConfig:
     review_threshold: float = 75.0
     min_margin: float = 0.0
     house_number_tolerance: int = 25
+    exact_house_number_first: bool = True
     street_blocking: bool = True
+    exact_street_first: bool = True
+    street_fallback: bool = True
     strict_locality: bool = True
     weights: Mapping[str, float] = field(default_factory=lambda: DEFAULT_WEIGHTS.copy())
 
@@ -93,6 +96,23 @@ def _text_similarity(left: Any, right: Any) -> float | None:
     return float(Levenshtein.normalized_similarity(left, right) * 100.0)
 
 
+def _text_similarity_batch(left: pd.Series, right: pd.Series) -> pd.Series:
+    """Score a text column while handling exact matches without fuzzy calls."""
+
+    left = left.fillna("").astype(str)
+    right = right.fillna("").astype(str)
+    available = left.ne("") & right.ne("")
+    exact = available & left.eq(right)
+    scores = pd.Series(float("nan"), index=left.index, dtype=float)
+    scores.loc[exact] = 100.0
+    fuzzy_index = scores.index[available & ~exact]
+    if len(fuzzy_index):
+        scores.loc[fuzzy_index] = [
+            _text_similarity(left.loc[index], right.loc[index]) for index in fuzzy_index
+        ]
+    return scores
+
+
 def _number_similarity(left: Any, right: Any) -> float | None:
     if left is None or right is None or pd.isna(left) or pd.isna(right):
         return None
@@ -140,10 +160,9 @@ def _score_candidates(
         ("state", "input_state_norm", "candidate_state_norm"),
         ("zip5", "input_zip5", "candidate_zip5"),
     ):
-        joined[f"score_{name}"] = [
-            _text_similarity(left, right)
-            for left, right in zip(joined[left_column].tolist(), joined[right_column].tolist())
-        ]
+        joined[f"score_{name}"] = _text_similarity_batch(
+            joined[left_column], joined[right_column]
+        )
     component_columns = ["house_number", "street", "city", "state", "zip5"]
     numerator = pd.Series(0.0, index=joined.index)
     denominator = pd.Series(0.0, index=joined.index)
@@ -228,13 +247,24 @@ class Geocoder:
 
         query_started = time.perf_counter()
         query_inputs = parsed_frame[
-            ["input_id", "house_number", "street_block", "state_norm", "city_norm", "zip5"]
+            [
+                "input_id",
+                "house_number",
+                "street_norm",
+                "street_block",
+                "state_norm",
+                "city_norm",
+                "zip5",
+            ]
         ]
         candidates = self.store.candidate_query(
             query_inputs,
             house_number_tolerance=self.config.house_number_tolerance,
             street_blocking=self.config.street_blocking,
             strict_locality=self.config.strict_locality,
+            exact_street_first=self.config.exact_street_first,
+            exact_house_number_first=self.config.exact_house_number_first,
+            street_fallback=self.config.street_fallback,
         )
         candidate_query_seconds = time.perf_counter() - query_started
 
@@ -286,14 +316,18 @@ class Geocoder:
             candidates["score_margin"] = pd.Series(dtype=float)
             return candidates
         candidates = candidates.sort_values(
-            ["input_id", "score", "candidate_address_id"], ascending=[True, False, True]
+            ["input_id", "score", "candidate_address_id"],
+            ascending=[True, False, True],
+            kind="mergesort",
         ).reset_index(drop=True)
-        candidates["candidate_rank"] = candidates.groupby("input_id").cumcount() + 1
-        counts = candidates.groupby("input_id")["candidate_address_id"].transform("size")
+        groups = candidates.groupby("input_id", sort=False)
+        candidates["candidate_rank"] = groups.cumcount() + 1
+        counts = groups["candidate_address_id"].transform("size")
         candidates["candidate_count"] = counts.astype(int)
-        second = candidates.groupby("input_id")["score"].transform(
-            lambda values: values.iloc[1] if len(values) > 1 else 0.0
-        )
+        second_scores = candidates.loc[candidates["candidate_rank"].eq(2)].set_index(
+            "input_id"
+        )["score"]
+        second = candidates["input_id"].map(second_scores).fillna(0.0)
         candidates["score_margin"] = candidates["score"] - second
         return candidates
 
@@ -309,7 +343,13 @@ class Geocoder:
             else pd.DataFrame()
         )
         if len(best):
-            best["match_status"] = best.apply(self._status, axis=1)
+            best["match_status"] = "unmatched"
+            auto = best["score"].ge(self.config.auto_match_threshold) & best[
+                "score_margin"
+            ].ge(self.config.min_margin)
+            review = best["score"].ge(self.config.review_threshold)
+            best.loc[review, "match_status"] = "review"
+            best.loc[auto, "match_status"] = "matched"
             best["auto_assigned"] = best["match_status"].eq("matched")
             best = best.rename(
                 columns={

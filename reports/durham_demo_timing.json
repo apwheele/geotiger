@@ -1,0 +1,21 @@
+{
+  "input_rows": 135088,
+  "reference_rows": 1542604,
+  "prepare_seconds": 167.445,
+  "interpolation_crs": "EPSG:2264",
+  "end_offset_m": 0,
+  "side_offset_m": 0,
+  "strict_locality": false,
+  "street_fallback": false,
+  "candidate_rows": 280853,
+  "matched": 111518,
+  "review": 10,
+  "unmatched": 23560,
+  "parse_seconds": 6.490625,
+  "candidate_query_seconds": 5.687785,
+  "scoring_seconds": 0.129915,
+  "aggregation_seconds": 0.353377,
+  "geocode_seconds": 12.665058,
+  "throughput_per_second": 10666.197,
+  "duckdb_threads": 4
+}

@@ -30,6 +30,7 @@ ADDRESS_COLUMNS = [
     "latitude",
     "longitude",
     "geometry_wkt",
+    "interpolation_crs",
     "source",
 ]
 
@@ -74,6 +75,7 @@ class GeoTIGERStore:
                 latitude DOUBLE,
                 longitude DOUBLE,
                 geometry_wkt VARCHAR,
+                interpolation_crs VARCHAR,
                 source VARCHAR
             )
             """
@@ -85,6 +87,9 @@ class GeoTIGERStore:
                 value VARCHAR
             )
             """
+        )
+        self.connection.execute(
+            "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS interpolation_crs VARCHAR"
         )
         for statement in (
             "CREATE INDEX IF NOT EXISTS addresses_state_zip ON addresses(state_norm, zip5)",
@@ -168,6 +173,10 @@ class GeoTIGERStore:
         house_number_tolerance: int = 25,
         street_blocking: bool = True,
         strict_locality: bool = True,
+        exact_street_first: bool = True,
+        exact_house_number_first: bool = True,
+        exact_street: bool = False,
+        street_fallback: bool = True,
     ) -> pd.DataFrame:
         """Return blocked candidates for parsed input records.
 
@@ -176,7 +185,65 @@ class GeoTIGERStore:
         """
 
         self.create()
-        required = ["input_id", "house_number", "street_block", "state_norm", "city_norm", "zip5"]
+        if exact_street_first and not exact_street:
+            eligible = inputs.loc[inputs["street_norm"].fillna("").ne("")]
+            exact = self.candidate_query(
+                eligible,
+                house_number_tolerance=house_number_tolerance,
+                street_blocking=street_blocking,
+                strict_locality=strict_locality,
+                exact_street_first=False,
+                exact_house_number_first=exact_house_number_first,
+                exact_street=True,
+            )
+            found = set(exact["input_id"].tolist()) if len(exact) else set()
+            remaining = inputs.loc[~inputs["input_id"].isin(found)]
+            if not len(remaining) or not street_fallback:
+                return exact
+            fallback = self.candidate_query(
+                remaining,
+                house_number_tolerance=house_number_tolerance,
+                street_blocking=street_blocking,
+                strict_locality=strict_locality,
+                exact_street_first=False,
+                exact_house_number_first=exact_house_number_first,
+                exact_street=False,
+                street_fallback=street_fallback,
+            )
+            return pd.concat([exact, fallback], ignore_index=True)
+        if exact_house_number_first and house_number_tolerance > 0:
+            exact = self.candidate_query(
+                inputs,
+                house_number_tolerance=0,
+                street_blocking=street_blocking,
+                strict_locality=strict_locality,
+                exact_street_first=False,
+                exact_house_number_first=False,
+                exact_street=exact_street,
+            )
+            found = set(exact["input_id"].tolist()) if len(exact) else set()
+            remaining = inputs.loc[~inputs["input_id"].isin(found)]
+            if not len(remaining):
+                return exact
+            fallback = self.candidate_query(
+                remaining,
+                house_number_tolerance=house_number_tolerance,
+                street_blocking=street_blocking,
+                strict_locality=strict_locality,
+                exact_street_first=False,
+                exact_house_number_first=False,
+                exact_street=exact_street,
+            )
+            return pd.concat([exact, fallback], ignore_index=True)
+        required = [
+            "input_id",
+            "house_number",
+            "street_norm",
+            "street_block",
+            "state_norm",
+            "city_norm",
+            "zip5",
+        ]
         missing = [column for column in required if column not in inputs.columns]
         if missing:
             raise ValueError(f"Parsed input is missing columns: {', '.join(missing)}")
@@ -186,18 +253,35 @@ class GeoTIGERStore:
             frame[column] = frame[column].fillna("").astype(str)
         view = f"_geotiger_inputs_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
-        local_where = (
-            "(i.state_norm = '' OR a.state_norm = i.state_norm) "
-            "AND (i.city_norm = '' OR a.city_norm = i.city_norm) "
-            "AND (i.zip5 = '' OR a.zip5 = i.zip5)"
-        )
-        if not strict_locality:
-            local_where = "TRUE"
-        street_where = (
-            "TRUE"
-            if not street_blocking
-            else "(i.street_block = '' OR a.street_block = i.street_block)"
-        )
+        conditions = []
+        for column in ("state_norm",):
+            if frame[column].ne("").all():
+                conditions.append(f"a.{column} = i.{column}")
+            else:
+                conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
+        if exact_street:
+            conditions.append("a.street_norm = i.street_norm")
+        elif street_blocking:
+            if frame["street_block"].ne("").all():
+                conditions.append("a.street_block = i.street_block")
+            else:
+                conditions.append("(i.street_block = '' OR a.street_block = i.street_block)")
+        if strict_locality:
+            for column in ("city_norm", "zip5"):
+                if frame[column].ne("").all():
+                    conditions.append(f"a.{column} = i.{column}")
+                else:
+                    conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
+        if frame["house_number"].notna().all():
+            conditions.append(
+                f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)}"
+            )
+        else:
+            conditions.append(
+                f"(i.house_number IS NULL OR abs(a.house_number - i.house_number) <= "
+                f"{int(house_number_tolerance)})"
+            )
+        join_where = " AND ".join(conditions) or "TRUE"
         query = f"""
             SELECT
                 i.input_id,
@@ -222,10 +306,7 @@ class GeoTIGERStore:
                 a.source AS candidate_source
             FROM {view} i
             INNER JOIN addresses a
-              ON {local_where}
-             AND {street_where}
-             AND (i.house_number IS NULL OR
-                  abs(a.house_number - i.house_number) <= {int(house_number_tolerance)})
+              ON {join_where}
         """
         try:
             return self.connection.execute(query).df()

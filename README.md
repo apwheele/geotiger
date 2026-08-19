@@ -13,8 +13,11 @@ hosted geocoding API or desktop GIS geocoder:
   `pygris` or supplied as a GeoDataFrame/GeoParquet file.
 - Street numbers are expanded one-by-one with parity-aware interpolation on the
   correct side of each street segment.
-- Interpolation is performed in a projected CRS and accounts for endpoint and
-  side offsets, including segments whose geometry has been clipped.
+- Interpolation is performed in a local projected CRS (North Carolina defaults
+  to EPSG:2264 state plane; other states use an appropriate NAD83 state-plane
+  CRS when available) and accounts for endpoint and side offsets, including
+  segments whose geometry has been clipped. Stored result coordinates remain
+  WGS84 latitude/longitude for mapping.
 - DuckDB performs the blocking join in parallel; RapidFuzz computes normalized
   Levenshtein scores locally.
 - Every potential candidate is returned, alongside the best match, score,
@@ -69,7 +72,7 @@ print(result.timings.to_dict())
 The default blocking rules are intentionally conservative. A candidate must
 share the input state, and when supplied, city and ZIP code. Those fields are
 not fuzzy-resolved across blocks. Candidates are additionally limited to a
-street initial block and a configurable house-number window. Within a block,
+compact first/last street-name signature and a configurable house-number window. Within a block,
 the score is a weighted, available-field-normalized average of:
 
 | Component | Default weight |
@@ -84,7 +87,13 @@ The default automatic assignment threshold is 90. Scores from 75 through 90
 are marked `review`; lower scores are `unmatched`. `min_margin` can be raised
 from its default of 0 to require a score gap from the runner-up when a project
 needs especially conservative automatic assignment. Thresholds, weights,
-blocking, and interpolation settings are all configurable.
+blocking, and interpolation settings are all configurable. By default, the
+candidate query first checks for an exact expanded house number and only uses
+the tolerance window for records without an exact candidate. Set
+`exact_house_number_first=False` when you need every address in the tolerance
+window returned for review. Set `street_fallback=False` to keep only exact
+normalized-street candidates (with house-number tolerance still available);
+this is useful for a large, well-standardized local dataset.
 
 Some raw TIGER/Line address-range vintages contain ZIP codes but no textual
 city field. With `strict_locality=True`, an input city therefore will not match
@@ -112,12 +121,30 @@ size, candidate counts, phase timings, and throughput. See
 [`docs/timing.md`](docs/timing.md) for the benchmark methodology and the
 checked-in baseline report.
 
+The current synthetic baseline is about 20,000 input rows/second on the
+development workstation. The full 135,088-row Durham demo processed about
+10,666 input rows/second after its one-time 167-second TIGER expansion; see
+[`reports/durham_demo_timing.md`](reports/durham_demo_timing.md). DuckDB uses
+its configured thread pool for joins, while parsing and scoring use optimized
+batch operations in the local Python process.
+
 ## Development
 
 ```powershell
 uv run pytest
 uv run ruff check .
 ```
+
+Run the full Durham demonstration with JupyterLab:
+
+```powershell
+uv sync --extra dev --extra demo
+uv run jupyter lab notebooks/durham_demo.ipynb
+```
+
+The compact public-data cache is included under
+[`notebooks/assets`](notebooks/assets). Prepared DuckDB and geocoded outputs
+are generated under `data/durham_demo/` and remain local/ignored.
 
 GeoTIGER is MIT licensed. Census TIGER/Line data remains subject to its own
 US Census Bureau terms and attribution requirements.

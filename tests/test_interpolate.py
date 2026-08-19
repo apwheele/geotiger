@@ -27,3 +27,17 @@ def test_prepare_ranges_uses_offset_inside_clipped_segment():
     # Even an endpoint address is not placed directly on the segment endpoint.
     endpoint_lon = -78.95
     assert (prepared["longitude"] > endpoint_lon).all()
+
+
+def test_prepare_ranges_accepts_current_pygris_house_number_columns():
+    frame = make_range_frame().iloc[[0]].rename(
+        columns={
+            "LFROMADD": "LFROMHN",
+            "LTOADD": "LTOHN",
+            "RFROMADD": "RFROMHN",
+            "RTOADD": "RTOHN",
+        }
+    )
+    prepared = prepare_ranges(frame, config=InterpolationConfig(end_offset_m=0, side_offset_m=0))
+    assert len(prepared) == 12
+    assert prepared["interpolation_crs"].eq("EPSG:2264").all()

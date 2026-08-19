@@ -30,6 +30,10 @@ dev = [
   "pytest-cov>=5.0",
   "ruff>=0.6",
 ]
+demo = [
+  "jupyterlab>=4.0",
+  "nbformat>=5.9",
+]
 
 [project.scripts]
 geotiger = "geotiger.cli:app"
@@ -44,7 +48,7 @@ addopts = "-ra"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
-

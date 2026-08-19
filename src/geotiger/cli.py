@@ -59,6 +59,13 @@ def prepare(
     source: str = typer.Option("tiger", help="Source label persisted with each candidate."),
     end_offset_m: float = typer.Option(5.0, help="Distance to keep from segment endpoints."),
     side_offset_m: float = typer.Option(5.0, help="Distance to offset from the street centerline."),
+    projected_crs: str | None = typer.Option(
+        None,
+        help=(
+            "Projected interpolation CRS; defaults to the state-plane CRS "
+            "inferred from the ranges."
+        ),
+    ),
     replace: bool = typer.Option(True, help="Replace existing address candidates."),
 ) -> None:
     """Expand local ranges and store them in DuckDB."""
@@ -66,13 +73,27 @@ def prepare(
     range_frame = load_ranges(ranges)
     prepared = prepare_ranges(
         range_frame,
-        config=InterpolationConfig(end_offset_m=end_offset_m, side_offset_m=side_offset_m),
+        config=InterpolationConfig(
+            projected_crs=projected_crs,
+            end_offset_m=end_offset_m,
+            side_offset_m=side_offset_m,
+        ),
         state=state,
         source=source,
     )
     with GeoTIGERStore(database) as store:
         count = store.ingest_candidates(prepared, replace=replace)
-        store.set_metadata(source=source, input_ranges=str(ranges), candidates=count)
+        interpolation_crs = (
+            str(prepared["interpolation_crs"].dropna().iloc[0])
+            if len(prepared) and "interpolation_crs" in prepared
+            else "unknown"
+        )
+        store.set_metadata(
+            source=source,
+            input_ranges=str(ranges),
+            candidates=count,
+            interpolation_crs=interpolation_crs,
+        )
     typer.echo(f"Stored {count:,} expanded candidates in {database}")
 
 

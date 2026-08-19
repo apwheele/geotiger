@@ -144,6 +144,13 @@ def normalize_zip(value: Any) -> str:
     return digits[:5].zfill(5) if digits else ""
 
 
+def street_block_key(value: Any) -> str:
+    """Make a compact street blocking signature tolerant of middle typos."""
+
+    compact = normalize_text(value).replace(" ", "")
+    return compact if len(compact) <= 6 else compact[:3] + compact[-3:]
+
+
 def extract_house_number(value: Any) -> int | None:
     """Extract the numeric portion of an address number such as ``12-14``."""
 
@@ -188,8 +195,7 @@ class ParsedAddress:
     def street_block(self) -> str:
         # Block on the first character of the street name, not a directional
         # prefix ("N Main" must share a block with TIGER's "Main").
-        street = normalize_text(self.street_name).replace(" ", "")
-        return street[:1] if street else ""
+        return street_block_key(self.street_name)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -210,6 +216,51 @@ def _first(parsed: Mapping[str, str], *keys: str) -> str:
     return ""
 
 
+def _simple_parse(
+    raw: str,
+    *,
+    city: Any,
+    state: Any,
+    zip_code: Any,
+) -> ParsedAddress | None:
+    """Fast path for the common ``123 N Main St`` form.
+
+    Full usaddress parsing remains the fallback for commas, units, rural
+    routes, and other complex forms. The fast path matters for large batches
+    of already standardized crime/RMS exports.
+    """
+
+    if not raw or "," in raw:
+        return None
+    normalized = normalize_text(raw)
+    tokens = normalized.split()
+    if len(tokens) < 2 or not tokens[0].isdigit():
+        return None
+    number = int(tokens.pop(0))
+    pre = ""
+    post = ""
+    if tokens and tokens[0] in _DIRECTIONALS:
+        pre = normalize_directional(tokens.pop(0))
+    if tokens and tokens[-1] in _DIRECTIONALS:
+        post = normalize_directional(tokens.pop())
+    suffix = ""
+    if tokens and tokens[-1] in _SUFFIXES:
+        suffix = normalize_suffix(tokens.pop())
+    if not tokens:
+        return None
+    return ParsedAddress(
+        raw_address=raw,
+        house_number=number,
+        pre_directional=pre,
+        street_name=normalize_text(" ".join(tokens)),
+        street_suffix=suffix,
+        post_directional=post,
+        city=normalize_text(city),
+        state=normalize_state(state),
+        zip5=normalize_zip(zip_code),
+    )
+
+
 def parse_address(
     address: Any,
     *,
@@ -220,6 +271,11 @@ def parse_address(
     """Parse a free-form US address and optionally override locality columns."""
 
     raw = "" if address is None else str(address)
+    if raw.strip().upper() in {"NAN", "<NA>", "NONE"}:
+        raw = ""
+    simple = _simple_parse(raw, city=city, state=state, zip_code=zip_code)
+    if simple is not None:
+        return simple
     parsed: dict[str, str]
     try:
         parsed, _ = usaddress.tag(raw)
