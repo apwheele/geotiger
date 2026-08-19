@@ -1,7 +1,7 @@
 # GeoTIGER timing report
 
-Generated: `2026-08-19 02:48:46 +0100`
-Machine: `Windows-10-10.0.19045-SP0`  
+Generated: `2026-08-19 03:29:17 +0100`
+Machine: `Windows-10-10.0.19045-SP0`
 Python: `3.12.12`
 
 ## Workload
@@ -15,15 +15,15 @@ Python: `3.12.12`
 
 | Phase | Seconds |
 | --- | ---: |
-| Prepare/interpolate ranges | 2.239 |
-| Load DuckDB reference | 0.159 |
-| Parse inputs | 0.325 |
-| DuckDB candidate query | 0.111 |
-| Fuzzy scoring | 0.021 |
-| Match aggregation | 0.033 |
-| Geocoding total | 0.491 |
+| Prepare/interpolate ranges | 2.094 |
+| Load DuckDB reference | 0.197 |
+| Parse inputs | 0.306 |
+| DuckDB candidate query | 0.114 |
+| Fuzzy scoring | 0.019 |
+| Match aggregation | 0.036 |
+| Geocoding total | 0.477 |
 
-Geocoding throughput was **20354.8 input rows/second**.
+Geocoding throughput was **20977.7 input rows/second**.
 
 ## Outcomes
 

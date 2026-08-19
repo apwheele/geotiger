@@ -10,29 +10,7 @@ from typing import Any
 import duckdb
 import pandas as pd
 
-ADDRESS_COLUMNS = [
-    "address_id",
-    "range_id",
-    "house_number",
-    "parity",
-    "side",
-    "pre_directional",
-    "street_name",
-    "street_suffix",
-    "post_directional",
-    "street_norm",
-    "street_block",
-    "city",
-    "city_norm",
-    "state",
-    "state_norm",
-    "zip5",
-    "latitude",
-    "longitude",
-    "geometry_wkt",
-    "interpolation_crs",
-    "source",
-]
+from .schema import ADDRESS_COLUMNS, normalize_source_type, source_priority
 
 
 class GeoTIGERStore:
@@ -76,7 +54,10 @@ class GeoTIGERStore:
                 longitude DOUBLE,
                 geometry_wkt VARCHAR,
                 interpolation_crs VARCHAR,
-                source VARCHAR
+                source VARCHAR,
+                source_type VARCHAR,
+                source_priority INTEGER,
+                source_record_id VARCHAR
             )
             """
         )
@@ -90,6 +71,38 @@ class GeoTIGERStore:
         )
         self.connection.execute(
             "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS interpolation_crs VARCHAR"
+        )
+        self.connection.execute(
+            "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS source_type VARCHAR"
+        )
+        self.connection.execute(
+            "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS source_priority INTEGER"
+        )
+        self.connection.execute(
+            "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS source_record_id VARCHAR"
+        )
+        self.connection.execute(
+            """
+            UPDATE addresses
+            SET source_type = CASE
+                WHEN lower(coalesce(source, '')) LIKE '%tiger%' THEN 'tiger'
+                ELSE 'custom'
+            END
+            WHERE source_type IS NULL
+            """
+        )
+        self.connection.execute(
+            """
+            UPDATE addresses
+            SET source_priority = CASE
+                WHEN source_type = 'tiger' THEN 20
+                ELSE 100
+            END
+            WHERE source_priority IS NULL
+            """
+        )
+        self.connection.execute(
+            "UPDATE addresses SET source_record_id = address_id WHERE source_record_id IS NULL"
         )
         for statement in (
             "CREATE INDEX IF NOT EXISTS addresses_state_zip ON addresses(state_norm, zip5)",
@@ -150,6 +163,25 @@ class GeoTIGERStore:
         frame = candidates.copy()
         if source is not None:
             frame["source"] = source
+        if "source" not in frame.columns:
+            frame["source"] = "unknown"
+        if "source_type" not in frame.columns:
+            frame["source_type"] = frame["source"].map(normalize_source_type)
+        else:
+            frame["source_type"] = frame["source_type"].map(normalize_source_type)
+        if "source_priority" not in frame.columns:
+            frame["source_priority"] = frame["source_type"].map(source_priority)
+        else:
+            frame["source_priority"] = pd.to_numeric(frame["source_priority"], errors="coerce")
+            frame["source_priority"] = frame["source_priority"].fillna(
+                frame["source_type"].map(source_priority)
+            )
+        if "source_record_id" not in frame.columns:
+            frame["source_record_id"] = frame["address_id"].astype(str)
+        else:
+            frame["source_record_id"] = frame["source_record_id"].fillna(
+                frame["address_id"].astype(str)
+            )
         for column in ADDRESS_COLUMNS:
             if column not in frame.columns:
                 frame[column] = None
@@ -303,7 +335,10 @@ class GeoTIGERStore:
                 a.latitude AS candidate_latitude,
                 a.longitude AS candidate_longitude,
                 a.geometry_wkt AS candidate_geometry_wkt,
-                a.source AS candidate_source
+                a.source AS candidate_source,
+                a.source_type AS candidate_source_type,
+                a.source_priority AS candidate_source_priority,
+                a.source_record_id AS candidate_source_record_id
             FROM {view} i
             INNER JOIN addresses a
               ON {join_where}

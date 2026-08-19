@@ -21,6 +21,7 @@ from .normalize import (
     parse_address,
     street_block_key,
 )
+from .schema import normalize_source_type
 from .state_plane import state_plane_crs
 
 
@@ -157,6 +158,8 @@ def prepare_ranges(
     config: InterpolationConfig | None = None,
     state: str | None = None,
     source: str = "unknown",
+    source_type: str = "tiger",
+    source_priority: int = 20,
 ) -> pd.DataFrame:
     """Expand TIGER/Line ranges into one row per address number and side.
 
@@ -170,9 +173,13 @@ def prepare_ranges(
     state:
         Optional state code used when the source does not contain an USPS state
         column (recommended for ``STATEFP``-only downloads).
+    source_type, source_priority:
+        Provenance kind and lower-is-better tie-break priority when combining
+        TIGER rows with local address or parcel references.
     """
 
     config = config or InterpolationConfig()
+    source_type = normalize_source_type(source_type)
     frame = ranges.copy()
     if "geometry" not in frame.columns:
         raise ValueError("ranges must include a geometry column")
@@ -274,6 +281,9 @@ def prepare_ranges(
                         "geometry_wkt": Point(longitude, latitude).wkt,
                         "interpolation_crs": str(projected_crs),
                         "source": source,
+                        "source_type": source_type,
+                        "source_priority": int(source_priority),
+                        "source_record_id": str(range_id),
                     }
                 )
     return pd.DataFrame(output_rows)

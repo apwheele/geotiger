@@ -315,11 +315,33 @@ class Geocoder:
             candidates["candidate_count"] = pd.Series(dtype="Int64")
             candidates["score_margin"] = pd.Series(dtype=float)
             return candidates
+        candidates = candidates.copy()
+        source_priority_values = candidates.get(
+            "candidate_source_priority", pd.Series(index=candidates.index, dtype=float)
+        )
+        candidates["_source_priority"] = pd.to_numeric(
+            source_priority_values, errors="coerce"
+        ).fillna(10_000)
+        candidates["_source_type_sort"] = candidates.get(
+            "candidate_source_type", pd.Series("", index=candidates.index)
+        ).fillna("").astype(str)
+        candidates["_source_record_sort"] = candidates.get(
+            "candidate_source_record_id", pd.Series("", index=candidates.index)
+        ).fillna("").astype(str)
         candidates = candidates.sort_values(
-            ["input_id", "score", "candidate_address_id"],
-            ascending=[True, False, True],
+            [
+                "input_id",
+                "score",
+                "_source_priority",
+                "_source_type_sort",
+                "_source_record_sort",
+                "candidate_address_id",
+            ],
+            ascending=[True, False, True, True, True, True],
             kind="mergesort",
-        ).reset_index(drop=True)
+        ).reset_index(drop=True).drop(
+            columns=["_source_priority", "_source_type_sort", "_source_record_sort"]
+        )
         groups = candidates.groupby("input_id", sort=False)
         candidates["candidate_rank"] = groups.cumcount() + 1
         counts = groups["candidate_address_id"].transform("size")
@@ -364,6 +386,9 @@ class Geocoder:
                     "candidate_longitude": "match_longitude",
                     "candidate_geometry_wkt": "match_geometry_wkt",
                     "candidate_source": "matched_source",
+                    "candidate_source_type": "matched_source_type",
+                    "candidate_source_priority": "matched_source_priority",
+                    "candidate_source_record_id": "matched_source_record_id",
                 }
             )
             keep = [
@@ -371,7 +396,9 @@ class Geocoder:
                 "matched_street_norm",
                 "matched_city", "matched_state", "matched_zip5", "match_latitude",
                 "match_longitude",
-                "match_geometry_wkt", "matched_source", "score", "score_margin", "candidate_count",
+                "match_geometry_wkt", "matched_source", "matched_source_type",
+                "matched_source_priority", "matched_source_record_id", "score", "score_margin",
+                "candidate_count",
                 "match_status", "auto_assigned", "score_house_number", "score_street", "score_city",
                 "score_state", "score_zip5",
             ]
@@ -396,6 +423,9 @@ class Geocoder:
             "match_longitude": None,
             "match_geometry_wkt": None,
             "matched_source": None,
+            "matched_source_type": None,
+            "matched_source_priority": None,
+            "matched_source_record_id": None,
             "score_house_number": 0.0,
             "score_street": 0.0,
             "score_city": 0.0,

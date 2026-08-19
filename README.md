@@ -49,23 +49,85 @@ import pandas as pd
 
 from geotiger import GeoTIGERStore, Geocoder, prepare_ranges
 
-store = GeoTIGERStore("data/durham.duckdb")
-store.create()
-prepare_ranges(ranges_gdf, store, source="tiger_2024")
+prepared = prepare_ranges(ranges_gdf, source="tiger_2024")
+with GeoTIGERStore("data/durham.duckdb") as store:
+    store.ingest_candidates(prepared, replace=True)
 
 inputs = pd.read_csv("data/addresses.csv")
-result = Geocoder(store).geocode(
-    inputs,
-    address_column="address",
-    city_column="city",
-    state_column="state",
-    zip_column="zip",
-)
+with GeoTIGERStore("data/durham.duckdb") as store:
+    result = Geocoder(store).geocode(inputs)
 
 result.matches.to_parquet("results/matches.parquet")
 result.candidates.to_parquet("results/all_potential_matches.parquet")
 print(result.timings.to_dict())
 ```
+
+## Local address and parcel references
+
+Local address points and parcels can be prepared into the same canonical table
+as TIGER ranges. Address tables may use a full address plus longitude/latitude
+or point geometry, or separate house-number and street columns. Parcel tables
+may use a situs address and polygon geometry; polygons are reduced to an
+interior representative point so the result stays inside the parcel.
+
+```python
+from geotiger import (
+    CombinedGeocoder,
+    GeoTIGERStore,
+    prepare_addresses,
+    prepare_combined,
+    prepare_parcels,
+    prepare_ranges,
+    save_prepared,
+)
+
+address_points = prepare_addresses(
+    address_points_gdf,
+    address_column="SITE_ADDR",
+    city_column="CITY",
+    state="NC",
+    zip_column="ZIP",
+    source="county_address_points",
+)
+parcel_points = prepare_parcels(
+    parcels_gdf,
+    address_column="SITUS_ADDRESS",
+    parcel_id_column="PIN",
+    source="county_parcels",
+)
+
+# This is one prepared dataset, not one database per source. Already-prepared
+# tables are accepted directly by prepare_combined.
+prepared = prepare_combined(
+    addresses=address_points,
+    parcels=parcel_points,
+    ranges=prepare_ranges(tiger_ranges_gdf, source="tiger_2024"),
+)
+save_prepared(prepared, "data/combined_reference.parquet")
+
+with GeoTIGERStore("data/combined.duckdb") as store:
+    geocoder = CombinedGeocoder.from_tables(
+        store,
+        addresses=address_points_gdf,
+        parcels=parcels_gdf,
+        ranges=tiger_ranges_gdf,
+        address_options={"address_column": "SITE_ADDR"},
+        parcel_options={"address_column": "SITUS_ADDRESS", "parcel_id_column": "PIN"},
+        range_options={"source": "tiger_2024"},
+    )
+    result = geocoder.geocode(inputs)
+```
+
+`individual > parcel > tiger` is the default source preference used by
+`CombinedGeocoder`. Match score remains primary; the preference is a
+deterministic tie-break for otherwise equivalent candidates. Change it with
+`source_preference=("parcel", "individual", "tiger")`. Prepared rows retain
+`source_type`, `source`, `source_priority`, and `source_record_id`; selected
+matches expose the corresponding `matched_source_*` fields for audit joins.
+All reference inputs must include coordinates. A regular table's geometry is
+assumed to be EPSG:4326 when no CRS is supplied; pass `input_crs` for projected
+X/Y or geometry data. Only TIGER ranges require interpolation, and they still
+use the local state-plane projection described above.
 
 ## Matching behavior
 
