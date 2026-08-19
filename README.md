@@ -129,6 +129,44 @@ assumed to be EPSG:4326 when no CRS is supplied; pass `input_crs` for projected
 X/Y or geometry data. Only TIGER ranges require interpolation, and they still
 use the local state-plane projection described above.
 
+## Explicit aliases and historical cache
+
+An explicit local lookup table is useful for business or landmark descriptions
+that are not literal postal addresses. The table can point directly to a
+prepared address ID:
+
+```python
+lookup = pd.DataFrame(
+    [{
+        "alias": "McDonalds First St",
+        "address_id": "county_address_points:42:0",
+        "city": "Durham",
+        "state": "NC",
+        "zip": "27514",
+    }]
+)
+store.ingest_lookup(lookup)
+```
+
+Alternatively, `CombinedGeocoder.add_lookup_table` accepts an
+`actual_address` column and resolves that target locally once before storing
+the alias mapping. Lookup hits return `match_method="lookup"` and bypass
+candidate matching.
+
+Historical results can be persisted after a reviewed workflow:
+
+```python
+result = geocoder.geocode(inputs)
+geocoder.cache_result(result)  # automatic matches only by default
+next_result = geocoder.geocode(inputs)
+```
+
+The second run returns `match_method="history_cache"` for exact normalized
+input keys. Use `GeocoderConfig(use_history_cache=False)` or
+`GeocoderConfig(use_lookup_table=False)` to disable either shortcut layer.
+The checked-in [shortcut timing report](reports/timing_shortcuts.md) measures
+both population cost and hit-run throughput.
+
 ## Matching behavior
 
 The default blocking rules are intentionally conservative. A candidate must
@@ -189,6 +227,13 @@ development workstation. The full 135,088-row Durham demo processed about
 [`reports/durham_demo_timing.md`](reports/durham_demo_timing.md). DuckDB uses
 its configured thread pool for joins, while parsing and scoring use optimized
 batch operations in the local Python process.
+
+The 10,000-row shortcut benchmark processed explicit lookup hits at about
+18,600 rows/second and historical-cache hits at about 21,200 rows/second.
+Those figures include parsing, local shortcut queries, and result assembly;
+the one-time table population costs were about 1.5 seconds for 10,000 aliases
+and 0.7 seconds for 10,000 historical mappings on that run. See
+[`reports/timing_shortcuts.md`](reports/timing_shortcuts.md).
 
 ## Development
 

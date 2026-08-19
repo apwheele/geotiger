@@ -234,9 +234,9 @@ def _simple_parse(
         return None
     normalized = normalize_text(raw)
     tokens = normalized.split()
-    if len(tokens) < 2 or not tokens[0].isdigit():
+    if len(tokens) < 2:
         return None
-    number = int(tokens.pop(0))
+    number = int(tokens.pop(0)) if tokens[0].isdigit() else None
     pre = ""
     post = ""
     if tokens and tokens[0] in _DIRECTIONALS:

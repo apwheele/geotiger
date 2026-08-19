@@ -68,6 +68,8 @@ Python: `{report['python']}`
 - Input rows: **{report['input_rows']:,}**
 - Prepared reference rows: **{report['reference_rows']:,}**
 - Candidate rows scored: **{timings['candidate_count']:,}**
+- Lookup hits: **{timings['lookup_hit_count']:,}**
+- Historical-cache hits: **{timings['history_cache_hit_count']:,}**
 - DuckDB threads: **{timings['duckdb_threads']}**
 
 ## Timings
@@ -77,6 +79,8 @@ Python: `{report['python']}`
 | Prepare/interpolate ranges | {report['prepare_seconds']:.3f} |
 | Load DuckDB reference | {report['ingest_seconds']:.3f} |
 | Parse inputs | {timings['parse_seconds']:.3f} |
+| Explicit lookup table | {timings['lookup_seconds']:.3f} |
+| Historical cache | {timings['history_cache_seconds']:.3f} |
 | DuckDB candidate query | {timings['candidate_query_seconds']:.3f} |
 | Fuzzy scoring | {timings['scoring_seconds']:.3f} |
 | Match aggregation | {timings['aggregation_seconds']:.3f} |

@@ -1,0 +1,78 @@
+{
+  "generated_at": "2026-08-19 12:01:26 +0100",
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python": "3.12.12",
+  "input_rows": 10000,
+  "reference_rows": 20000,
+  "reference_prepare_seconds": 2.177620400005253,
+  "duckdb_threads": 4,
+  "baseline": {
+    "populate_seconds": 0.0,
+    "timings": {
+      "input_count": 10000,
+      "candidate_count": 10000,
+      "lookup_hit_count": 0,
+      "history_cache_hit_count": 0,
+      "matched_count": 10000,
+      "review_count": 0,
+      "unmatched_count": 0,
+      "parse_seconds": 0.318023,
+      "lookup_seconds": 0.021679,
+      "history_cache_seconds": 0.015322,
+      "candidate_query_seconds": 0.128762,
+      "scoring_seconds": 0.018443,
+      "aggregation_seconds": 0.038061,
+      "total_seconds": 0.584708,
+      "throughput_per_second": 17102.56,
+      "duckdb_threads": 4,
+      "python": "3.12.12",
+      "platform": "Windows-10-10.0.19045-SP0"
+    }
+  },
+  "lookup": {
+    "populate_seconds": 1.4824954000068828,
+    "timings": {
+      "input_count": 10000,
+      "candidate_count": 10000,
+      "lookup_hit_count": 10000,
+      "history_cache_hit_count": 0,
+      "matched_count": 10000,
+      "review_count": 0,
+      "unmatched_count": 0,
+      "parse_seconds": 0.362683,
+      "lookup_seconds": 0.07728,
+      "history_cache_seconds": 9.7e-05,
+      "candidate_query_seconds": 0.002508,
+      "scoring_seconds": 0.003062,
+      "aggregation_seconds": 0.040007,
+      "total_seconds": 0.537316,
+      "throughput_per_second": 18611.015,
+      "duckdb_threads": 4,
+      "python": "3.12.12",
+      "platform": "Windows-10-10.0.19045-SP0"
+    }
+  },
+  "history_cache": {
+    "populate_seconds": 0.7041691999911563,
+    "timings": {
+      "input_count": 10000,
+      "candidate_count": 10000,
+      "lookup_hit_count": 0,
+      "history_cache_hit_count": 10000,
+      "matched_count": 10000,
+      "review_count": 0,
+      "unmatched_count": 0,
+      "parse_seconds": 0.344254,
+      "lookup_seconds": 0.001905,
+      "history_cache_seconds": 0.046996,
+      "candidate_query_seconds": 0.002133,
+      "scoring_seconds": 0.003093,
+      "aggregation_seconds": 0.029853,
+      "total_seconds": 0.471022,
+      "throughput_per_second": 21230.417,
+      "duckdb_threads": 4,
+      "python": "3.12.12",
+      "platform": "Windows-10-10.0.19045-SP0"
+    }
+  }
+}

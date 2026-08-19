@@ -76,3 +76,18 @@ def source_priority(source_type: Any, preference: tuple[str, ...] | None = None)
         if normalized in preferred:
             return preferred[normalized]
     return SOURCE_PRIORITIES.get(normalized, 100)
+
+
+def address_cache_key(row: Any) -> str:
+    """Build a stable key from the normalized fields used for matching."""
+
+    values = []
+    for column in ("house_number", "street_norm", "city_norm", "state_norm", "zip5"):
+        value = row.get(column, "") if hasattr(row, "get") else ""
+        if value is None:
+            value = ""
+        text = str(value).strip()
+        if text.upper() in {"NAN", "NONE", "<NA>"}:
+            text = ""
+        values.append(text)
+    return "\x1f".join(values)

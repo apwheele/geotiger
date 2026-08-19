@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 from rapidfuzz.distance import Levenshtein
 
-from .normalize import parse_record
+from .normalize import normalize_text, parse_record
 from .store import GeoTIGERStore
 
 DEFAULT_WEIGHTS = {
@@ -37,6 +37,8 @@ class GeocoderConfig:
     exact_street_first: bool = True
     street_fallback: bool = True
     strict_locality: bool = True
+    use_lookup_table: bool = True
+    use_history_cache: bool = True
     weights: Mapping[str, float] = field(default_factory=lambda: DEFAULT_WEIGHTS.copy())
 
 
@@ -44,10 +46,14 @@ class GeocoderConfig:
 class TimingReport:
     input_count: int
     candidate_count: int
+    lookup_hit_count: int
+    history_cache_hit_count: int
     matched_count: int
     review_count: int
     unmatched_count: int
     parse_seconds: float
+    lookup_seconds: float
+    history_cache_seconds: float
     candidate_query_seconds: float
     scoring_seconds: float
     aggregation_seconds: float
@@ -62,10 +68,14 @@ class TimingReport:
         result = {
             "input_count": self.input_count,
             "candidate_count": self.candidate_count,
+            "lookup_hit_count": self.lookup_hit_count,
+            "history_cache_hit_count": self.history_cache_hit_count,
             "matched_count": self.matched_count,
             "review_count": self.review_count,
             "unmatched_count": self.unmatched_count,
             "parse_seconds": round(self.parse_seconds, 6),
+            "lookup_seconds": round(self.lookup_seconds, 6),
+            "history_cache_seconds": round(self.history_cache_seconds, 6),
             "candidate_query_seconds": round(self.candidate_query_seconds, 6),
             "scoring_seconds": round(self.scoring_seconds, 6),
             "aggregation_seconds": round(self.aggregation_seconds, 6),
@@ -113,6 +123,20 @@ def _text_similarity_batch(left: pd.Series, right: pd.Series) -> pd.Series:
     return scores
 
 
+def _cache_key_series(parsed: pd.DataFrame) -> pd.Series:
+    """Build historical-cache keys without a row-wise Python apply."""
+
+    parts = []
+    for column in ("house_number", "street_norm", "city_norm", "state_norm", "zip5"):
+        values = parsed[column].fillna("").astype(str)
+        values = values.replace({"nan": "", "None": "", "<NA>": ""})
+        parts.append(values)
+    result = parts[0]
+    for part in parts[1:]:
+        result = result.str.cat(part, sep="\x1f")
+    return result
+
+
 def _number_similarity(left: Any, right: Any) -> float | None:
     if left is None or right is None or pd.isna(left) or pd.isna(right):
         return None
@@ -132,6 +156,19 @@ def _score_candidates(
     Avoiding ``DataFrame.iterrows`` is material for a 10k-row run: the blocked
     table commonly contains hundreds of thousands of potential candidates.
     """
+
+    if "candidate_score_override" in candidates.columns:
+        overrides = pd.to_numeric(candidates["candidate_score_override"], errors="coerce")
+        shortcut_mask = overrides.notna()
+        if shortcut_mask.any():
+            shortcut = candidates.loc[shortcut_mask].copy()
+            shortcut["score"] = overrides.loc[shortcut_mask]
+            for name in ("house_number", "street", "city", "state", "zip5"):
+                shortcut[f"score_{name}"] = overrides.loc[shortcut_mask]
+            if shortcut_mask.all():
+                return shortcut
+            normal = _score_candidates(candidates.loc[~shortcut_mask], parsed_inputs, weights)
+            return pd.concat([normal, shortcut], ignore_index=True)
 
     parsed = parsed_inputs.set_index("input_id")
     joined = candidates.join(
@@ -245,28 +282,70 @@ class Geocoder:
         )
         parse_seconds = time.perf_counter() - parse_started
 
-        query_started = time.perf_counter()
-        query_inputs = parsed_frame[
-            [
-                "input_id",
-                "house_number",
-                "street_norm",
-                "street_block",
-                "state_norm",
-                "city_norm",
-                "zip5",
-            ]
-        ]
-        candidates = self.store.candidate_query(
-            query_inputs,
-            house_number_tolerance=self.config.house_number_tolerance,
-            street_blocking=self.config.street_blocking,
-            strict_locality=self.config.strict_locality,
-            exact_street_first=self.config.exact_street_first,
-            exact_house_number_first=self.config.exact_house_number_first,
-            street_fallback=self.config.street_fallback,
+        parsed_frame["lookup_norm"] = parsed_frame["raw_address"].map(normalize_text)
+        parsed_frame["cache_key"] = _cache_key_series(parsed_frame)
+        cache_started = time.perf_counter()
+        cache_candidates = pd.DataFrame()
+        if self.config.use_history_cache:
+            cache_candidates = self.store.history_cache_query(
+                parsed_frame[["input_id", "cache_key"]]
+            )
+        history_cache_seconds = time.perf_counter() - cache_started
+        cache_ids = set(cache_candidates["input_id"].tolist()) if len(cache_candidates) else set()
+
+        lookup_started = time.perf_counter()
+        lookup_candidates = pd.DataFrame()
+        lookup_remaining = parsed_frame.loc[~parsed_frame["input_id"].isin(cache_ids)]
+        if self.config.use_lookup_table and len(lookup_remaining):
+            lookup_candidates = self.store.lookup_query(
+                lookup_remaining[
+                    ["input_id", "lookup_norm", "state_norm", "city_norm", "zip5"]
+                ],
+                strict_locality=self.config.strict_locality,
+            )
+        lookup_seconds = time.perf_counter() - lookup_started
+        lookup_ids = (
+            set(lookup_candidates["input_id"].tolist()) if len(lookup_candidates) else set()
         )
+
+        query_started = time.perf_counter()
+        candidate_remaining = parsed_frame.loc[
+            ~parsed_frame["input_id"].isin(cache_ids | lookup_ids)
+        ]
+        if len(candidate_remaining):
+            query_inputs = candidate_remaining[
+                [
+                    "input_id",
+                    "house_number",
+                    "street_norm",
+                    "street_block",
+                    "state_norm",
+                    "city_norm",
+                    "zip5",
+                ]
+            ]
+            candidate_query = self.store.candidate_query(
+                query_inputs,
+                house_number_tolerance=self.config.house_number_tolerance,
+                street_blocking=self.config.street_blocking,
+                strict_locality=self.config.strict_locality,
+                exact_street_first=self.config.exact_street_first,
+                exact_house_number_first=self.config.exact_house_number_first,
+                street_fallback=self.config.street_fallback,
+            )
+        else:
+            candidate_query = pd.DataFrame()
         candidate_query_seconds = time.perf_counter() - query_started
+        candidate_frames = [
+            frame
+            for frame in (cache_candidates, lookup_candidates, candidate_query)
+            if len(frame)
+        ]
+        candidates = (
+            pd.concat(candidate_frames, ignore_index=True)
+            if candidate_frames
+            else pd.DataFrame()
+        )
 
         score_started = time.perf_counter()
         if len(candidates):
@@ -292,10 +371,14 @@ class Geocoder:
         timings = TimingReport(
             input_count=len(frame),
             candidate_count=len(candidates),
+            lookup_hit_count=len(lookup_ids),
+            history_cache_hit_count=len(cache_ids),
             matched_count=int(status_counts.get("matched", 0)),
             review_count=int(status_counts.get("review", 0)),
             unmatched_count=int(status_counts.get("unmatched", 0)),
             parse_seconds=parse_seconds,
+            lookup_seconds=lookup_seconds,
+            history_cache_seconds=history_cache_seconds,
             candidate_query_seconds=candidate_query_seconds,
             scoring_seconds=scoring_seconds,
             aggregation_seconds=aggregation_seconds,
@@ -308,6 +391,11 @@ class Geocoder:
             parsed_inputs=parsed_frame,
             timings=timings,
         )
+
+    def cache_result(self, result: GeocodeResult, *, only_auto: bool = True) -> int:
+        """Persist a geocode result for exact reuse on future runs."""
+
+        return self.store.cache_matches(result, only_auto=only_auto)
 
     def _add_candidate_ranks(self, candidates: pd.DataFrame) -> pd.DataFrame:
         if not len(candidates):
@@ -389,6 +477,9 @@ class Geocoder:
                     "candidate_source_type": "matched_source_type",
                     "candidate_source_priority": "matched_source_priority",
                     "candidate_source_record_id": "matched_source_record_id",
+                    "candidate_lookup_id": "matched_lookup_id",
+                    "candidate_cache_key": "matched_cache_key",
+                    "candidate_match_method": "match_method",
                 }
             )
             keep = [
@@ -399,6 +490,7 @@ class Geocoder:
                 "match_geometry_wkt", "matched_source", "matched_source_type",
                 "matched_source_priority", "matched_source_record_id", "score", "score_margin",
                 "candidate_count",
+                "matched_lookup_id", "matched_cache_key", "match_method",
                 "match_status", "auto_assigned", "score_house_number", "score_street", "score_city",
                 "score_state", "score_zip5",
             ]
@@ -426,6 +518,9 @@ class Geocoder:
             "matched_source_type": None,
             "matched_source_priority": None,
             "matched_source_record_id": None,
+            "matched_lookup_id": None,
+            "matched_cache_key": None,
+            "match_method": "candidate",
             "score_house_number": 0.0,
             "score_street": 0.0,
             "score_city": 0.0,
