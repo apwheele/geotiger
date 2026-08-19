@@ -68,6 +68,28 @@ def test_prepare_addresses_builds_common_point_reference_schema():
     assert prepared.loc[0, "longitude"] == -78.95
 
 
+def test_prepare_addresses_accepts_intersection_without_house_number():
+    records = pd.DataFrame(
+        [
+            {
+                "address": "Main St & Market Ave",
+                "city": "Durham",
+                "state": "NC",
+                "lon": -78.95,
+                "lat": 36.0,
+                "address_id": "intersection-1",
+            }
+        ]
+    )
+
+    prepared = prepare_addresses(records)
+
+    assert len(prepared) == 1
+    assert prepared.loc[0, "is_intersection"]
+    assert prepared.loc[0, "house_number"] is None
+    assert prepared.loc[0, "intersection_key"] == "MAIN ST || MARKET AVE"
+
+
 def test_prepare_parcels_uses_an_interior_representative_point():
     prepared = prepare_parcels(make_parcel_table())
     point = wkt.loads(prepared.loc[0, "geometry_wkt"])

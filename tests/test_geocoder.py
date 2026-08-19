@@ -1,7 +1,8 @@
 import pandas as pd
-from conftest import make_store
+from conftest import make_range_frame, make_store
+from shapely.geometry import LineString
 
-from geotiger import Geocoder, GeocoderConfig
+from geotiger import Geocoder, GeocoderConfig, InterpolationConfig, prepare_ranges
 
 
 def test_geocode_returns_match_and_all_potential_candidates():
@@ -20,6 +21,28 @@ def test_geocode_returns_match_and_all_potential_candidates():
     assert result.timings.input_count == 2
     assert result.timings.candidate_count == len(result.candidates)
     assert result.timings.throughput_per_second > 0
+
+
+def test_geocoder_matches_prepared_intersection_points():
+    ranges = make_range_frame().copy()
+    ranges.loc[1, "FULLNAME"] = "First Avenue"
+    ranges.loc[1, "geometry"] = LineString([(-78.945, 35.995), (-78.945, 36.005)])
+    prepared = prepare_ranges(
+        ranges,
+        config=InterpolationConfig(end_offset_m=0, side_offset_m=0),
+    )
+    store = make_store()
+    store.ingest_candidates(prepared, replace=True)
+
+    result = Geocoder(store).geocode(
+        pd.DataFrame(
+            [{"address": "First Avenue at Main Street", "state": "NC", "zip": "27514"}]
+        )
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_is_intersection"]
+    assert result.matches.loc[0, "matched_intersection_key"] == "FIRST AVE || MAIN ST"
 
 
 def test_exact_house_number_first_is_fast_but_tolerance_fallback_is_available():

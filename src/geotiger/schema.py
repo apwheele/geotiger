@@ -29,6 +29,10 @@ ADDRESS_COLUMNS = [
     "source_type",
     "source_priority",
     "source_record_id",
+    "is_intersection",
+    "intersection_key",
+    "intersection_street_norm",
+    "intersection_street_block",
 ]
 
 # Lower numbers are preferred when match scores are otherwise equal. The

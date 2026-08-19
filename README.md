@@ -13,6 +13,14 @@ hosted geocoding API or desktop GIS geocoder:
   `pygris` or supplied as a GeoDataFrame/GeoParquet file.
 - Street numbers are expanded one-by-one with parity-aware interpolation on the
   correct side of each street segment.
+- Street intersections are prepared by default from crossing local street
+  geometries and are matched with an order-independent two-street key. Input
+  forms such as `Main St / First Ave`, `Main St AT First Ave`, and
+  `Intersection of Main St & First Ave` are identified explicitly.
+- Intersection points are geometric crossings; if the source does not carry
+  grade-separation information, bridges and tunnels may need
+  `InterpolationConfig(include_intersections=False)` or a local authoritative
+  intersection table.
 - Interpolation is performed in a local projected CRS (North Carolina defaults
   to EPSG:2264 state plane; other states use an appropriate NAD83 state-plane
   CRS when available) and accounts for endpoint and side offsets, including
@@ -223,7 +231,8 @@ checked-in baseline report.
 
 The current synthetic baseline is about 20,000 input rows/second on the
 development workstation. The full 135,088-row Durham demo processed about
-10,666 input rows/second after its one-time 167-second TIGER expansion; see
+6,722 input rows/second with 7,622 prepared intersection points; its one-time
+intersection-aware TIGER expansion took 26.6 seconds after vectorization; see
 [`reports/durham_demo_timing.md`](reports/durham_demo_timing.md). DuckDB uses
 its configured thread pool for joins, while parsing and scoring use optimized
 batch operations in the local Python process.

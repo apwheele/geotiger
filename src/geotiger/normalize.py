@@ -18,6 +18,9 @@ import usaddress
 _SPACE_RE = re.compile(r"\s+")
 _NON_ALNUM_RE = re.compile(r"[^A-Z0-9 ]+")
 _NUMBER_RE = re.compile(r"^\s*(\d+)")
+_LEADING_NUMBER_RE = re.compile(r"^\s*(\d+)\s+(.*)$")
+_INTERSECTION_SEPARATOR_RE = re.compile(r"\s*(?:/|&|@|\+)\s*|\s+\b(?:AT|AND)\b\s+", re.IGNORECASE)
+_INTERSECTION_PREFIX_RE = re.compile(r"^\s*(?:INTERSECTION|CORNER)\s+OF\s+", re.IGNORECASE)
 
 _DIRECTIONALS = {
     "NORTH": "N",
@@ -151,6 +154,13 @@ def street_block_key(value: Any) -> str:
     return compact if len(compact) <= 6 else compact[:3] + compact[-3:]
 
 
+def intersection_key(left: Any, right: Any) -> str:
+    """Return an order-independent key for a two-street intersection."""
+
+    streets = sorted(value for value in (normalize_text(left), normalize_text(right)) if value)
+    return " || ".join(streets)
+
+
 def extract_house_number(value: Any) -> int | None:
     """Extract the numeric portion of an address number such as ``12-14``."""
 
@@ -172,6 +182,9 @@ class ParsedAddress:
     city: str = ""
     state: str = ""
     zip5: str = ""
+    is_intersection: bool = False
+    intersection_street_norm: str = ""
+    intersection_key: str = ""
 
     @property
     def street_norm(self) -> str:
@@ -181,7 +194,8 @@ class ParsedAddress:
             self.street_suffix,
             self.post_directional,
         ]
-        return normalize_text(" ".join(part for part in parts if part))
+        street = normalize_text(" ".join(part for part in parts if part))
+        return self.intersection_key if self.is_intersection else street
 
     @property
     def city_norm(self) -> str:
@@ -197,6 +211,12 @@ class ParsedAddress:
         # prefix ("N Main" must share a block with TIGER's "Main").
         return street_block_key(self.street_name)
 
+    @property
+    def intersection_street_block(self) -> str:
+        """Return the compact block key for the second intersection street."""
+
+        return street_block_key(self.intersection_street_norm)
+
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result.update(
@@ -204,6 +224,7 @@ class ParsedAddress:
             city_norm=self.city_norm,
             state_norm=self.state_norm,
             street_block=self.street_block,
+            intersection_street_block=self.intersection_street_block,
         )
         return result
 
@@ -261,14 +282,14 @@ def _simple_parse(
     )
 
 
-def parse_address(
+def _parse_single_address(
     address: Any,
     *,
     city: Any = "",
     state: Any = "",
     zip_code: Any = "",
 ) -> ParsedAddress:
-    """Parse a free-form US address and optionally override locality columns."""
+    """Parse one non-intersection US address."""
 
     raw = "" if address is None else str(address)
     if raw.strip().upper() in {"NAN", "<NA>", "NONE"}:
@@ -315,6 +336,80 @@ def parse_address(
         state=normalize_state(state) or normalize_state(parsed_state),
         zip5=normalize_zip(zip_code) or normalize_zip(parsed_zip),
     )
+
+
+def _intersection_parts(raw: str) -> tuple[int | None, str, str] | None:
+    """Split a two-street intersection while preserving an optional number."""
+
+    text = _INTERSECTION_PREFIX_RE.sub("", raw.split(",", 1)[0])
+    house_number: int | None = None
+    leading = _LEADING_NUMBER_RE.match(text)
+    if leading:
+        house_number = int(leading.group(1))
+        text = leading.group(2)
+    parts = [part.strip() for part in _INTERSECTION_SEPARATOR_RE.split(text) if part.strip()]
+    if len(parts) != 2:
+        return None
+    return house_number, parts[0], parts[1]
+
+
+def parse_address(
+    address: Any,
+    *,
+    city: Any = "",
+    state: Any = "",
+    zip_code: Any = "",
+) -> ParsedAddress:
+    """Parse a free-form US address or a two-street intersection.
+
+    Intersections may use ``/``, ``&``, ``@``, ``+``, ``AND``, or ``AT`` as the
+    separator. A leading number is retained as an optional block/incident
+    number, but it is not required for intersection matching.
+    """
+
+    raw = "" if address is None else str(address)
+    if raw.strip().upper() in {"NAN", "<NA>", "NONE"}:
+        raw = ""
+    parts = _intersection_parts(raw) if raw else None
+    if parts is not None:
+        house_number, left, right = parts
+        locality = _parse_single_address(
+            "1 Main St" + raw[raw.find(",") :], city="", state="", zip_code=""
+        ) if "," in raw else ParsedAddress()
+        resolved_city = normalize_text(city) or locality.city
+        resolved_state = normalize_state(state) or locality.state
+        resolved_zip = normalize_zip(zip_code) or locality.zip5
+        left_parsed = _parse_single_address(
+            left,
+            city=resolved_city,
+            state=resolved_state,
+            zip_code=resolved_zip,
+        )
+        right_parsed = _parse_single_address(
+            right,
+            city=resolved_city,
+            state=resolved_state,
+            zip_code=resolved_zip,
+        )
+        if left_parsed.street_norm and right_parsed.street_norm:
+            return ParsedAddress(
+                raw_address=raw,
+                house_number=house_number,
+                pre_directional=left_parsed.pre_directional,
+                street_name=left_parsed.street_name,
+                street_suffix=left_parsed.street_suffix,
+                post_directional=left_parsed.post_directional,
+                city=resolved_city or left_parsed.city,
+                state=resolved_state or left_parsed.state,
+                zip5=resolved_zip or left_parsed.zip5,
+                is_intersection=True,
+                intersection_street_norm=right_parsed.street_norm,
+                intersection_key=intersection_key(
+                    left_parsed.street_norm,
+                    right_parsed.street_norm,
+                ),
+            )
+    return _parse_single_address(raw, city=city, state=state, zip_code=zip_code)
 
 
 def parse_record(

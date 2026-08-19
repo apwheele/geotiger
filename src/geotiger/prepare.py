@@ -285,7 +285,7 @@ def _prepare_point_table(
             state=state if state is not None else _value(row, state_column),
             zip_code=zip_code if zip_code is not None else _value(row, zip_column),
         )
-        if parsed.house_number is None or not parsed.street_name:
+        if (not parsed.is_intersection and parsed.house_number is None) or not parsed.street_name:
             continue
         record_id = _value(row, id_column, index)
         if not _has_value(record_id):
@@ -298,8 +298,12 @@ def _prepare_point_table(
                 "address_id": address_id,
                 "range_id": record_id,
                 "house_number": parsed.house_number,
-                "parity": "even" if parsed.house_number % 2 == 0 else "odd",
-                "side": "P",
+                "parity": (
+                    "intersection"
+                    if parsed.is_intersection
+                    else "even" if parsed.house_number % 2 == 0 else "odd"
+                ),
+                "side": "I" if parsed.is_intersection else "P",
                 "pre_directional": parsed.pre_directional,
                 "street_name": parsed.street_name,
                 "street_suffix": parsed.street_suffix,
@@ -319,6 +323,10 @@ def _prepare_point_table(
                 "source_type": source_type,
                 "source_priority": source_priority,
                 "source_record_id": record_id,
+                "is_intersection": parsed.is_intersection,
+                "intersection_key": parsed.intersection_key,
+                "intersection_street_norm": parsed.intersection_street_norm,
+                "intersection_street_block": parsed.intersection_street_block,
             }
         )
     if not output:

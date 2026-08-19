@@ -6,6 +6,7 @@ from .geocoder import Geocoder, GeocoderConfig, GeocodeResult, TimingReport
 from .interpolate import InterpolationConfig, prepare_ranges
 from .normalize import (
     ParsedAddress,
+    intersection_key,
     normalize_state,
     normalize_text,
     parse_address,
@@ -36,6 +37,7 @@ __all__ = [
     "matches_map",
     "matches_static_map",
     "normalize_text",
+    "intersection_key",
     "normalize_state",
     "parse_address",
     "prepare_ranges",

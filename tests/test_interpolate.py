@@ -1,4 +1,5 @@
 from conftest import make_range_frame
+from shapely.geometry import LineString
 
 from geotiger import InterpolationConfig, prepare_ranges
 
@@ -41,3 +42,19 @@ def test_prepare_ranges_accepts_current_pygris_house_number_columns():
     prepared = prepare_ranges(frame, config=InterpolationConfig(end_offset_m=0, side_offset_m=0))
     assert len(prepared) == 12
     assert prepared["interpolation_crs"].eq("EPSG:2264").all()
+
+
+def test_prepare_ranges_adds_intersection_points_by_default():
+    frame = make_range_frame().copy()
+    frame.loc[1, "FULLNAME"] = "First Avenue"
+    frame.loc[1, "geometry"] = LineString([(-78.945, 35.995), (-78.945, 36.005)])
+
+    prepared = prepare_ranges(
+        frame,
+        config=InterpolationConfig(end_offset_m=0, side_offset_m=0),
+    )
+
+    intersections = prepared.loc[prepared["is_intersection"]]
+    assert len(intersections) == 1
+    assert intersections.iloc[0]["intersection_key"] == "FIRST AVE || MAIN ST"
+    assert intersections.iloc[0]["side"] == "I"

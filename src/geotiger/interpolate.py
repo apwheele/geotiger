@@ -17,6 +17,7 @@ from shapely.geometry import LineString, MultiLineString, Point
 from shapely.ops import linemerge
 
 from .normalize import (
+    intersection_key,
     normalize_state,
     normalize_text,
     normalize_zip,
@@ -35,7 +36,9 @@ class InterpolationConfig:
     segment. This is important when the source edge has been clipped: the
     address fraction is still based on the source range, but the usable point
     is moved away from the clipped/dangling endpoint. ``side_offset_m`` moves
-    the point to the left or right of the directed TIGER line.
+    the point to the left or right of the directed TIGER line. When
+    ``include_intersections`` is true, crossing named street geometries also
+    contribute explicit point rows for order-independent intersection matching.
     """
 
     projected_crs: str | None = None
@@ -43,6 +46,7 @@ class InterpolationConfig:
     end_offset_m: float = 5.0
     side_offset_m: float = 5.0
     max_addresses_per_range: int = 10_000
+    include_intersections: bool = True
 
 
 _CANDIDATES = {
@@ -188,6 +192,148 @@ def _state_from_row(row: pd.Series, state_column: str | None, configured: str | 
     return normalize_state(value)
 
 
+def _intersection_points(value: Any) -> list[Point]:
+    """Extract point parts from a line intersection, ignoring overlaps."""
+
+    if value is None or value.is_empty:
+        return []
+    if value.geom_type == "Point":
+        return [value]
+    if value.geom_type == "MultiPoint":
+        return list(value.geoms)
+    if value.geom_type == "GeometryCollection":
+        points: list[Point] = []
+        for part in value.geoms:
+            points.extend(_intersection_points(part))
+        return points
+    return []
+
+
+def _prepare_intersection_rows(
+    frame: gpd.GeoDataFrame,
+    projected: gpd.GeoDataFrame,
+    *,
+    full_col: str,
+    state_col: str | None,
+    lzip_col: str | None,
+    rzip_col: str | None,
+    lcity_col: str | None,
+    rcity_col: str | None,
+    state: str | None,
+    projected_crs: str,
+    transformer: Transformer,
+    source: str,
+    source_type: str,
+    source_priority: int,
+) -> list[dict[str, Any]]:
+    """Create one canonical point row for each pair of crossing street names."""
+
+    metadata: list[dict[str, Any]] = []
+    lines: list[LineString | None] = []
+    for row_number, (original, projected_row) in enumerate(
+        zip(frame.itertuples(index=False), projected.itertuples(index=False))
+    ):
+        original_row = pd.Series(original, index=frame.columns)
+        projected_row = pd.Series(projected_row, index=projected.columns)
+        line = _line_geometry(projected_row["geometry"])
+        lines.append(line)
+        full_name = str(_value(original_row, full_col, ""))
+        parsed = parse_address(
+            f"1 {full_name}",
+            state=_state_from_row(original_row, state_col, state),
+        )
+        if line is None or line.length == 0 or not parsed.street_norm or parsed.is_intersection:
+            metadata.append({"street_norm": ""})
+            continue
+        range_id = _value(original_row, None, row_number)
+        for id_col in ("TLID", "LINEARID", "RANGE_ID", "ID"):
+            actual = {str(col).upper(): col for col in frame.columns}.get(id_col)
+            if actual is not None:
+                range_id = _value(original_row, actual, row_number)
+                break
+        city = normalize_text(
+            _value(original_row, lcity_col) or _value(original_row, rcity_col)
+        )
+        zip5 = normalize_zip(_value(original_row, lzip_col) or _value(original_row, rzip_col))
+        metadata.append(
+            {
+                "street_norm": parsed.street_norm,
+                "street_block": parsed.street_block,
+                "pre_directional": parsed.pre_directional,
+                "street_name": parsed.street_name,
+                "street_suffix": parsed.street_suffix,
+                "post_directional": parsed.post_directional,
+                "city": city,
+                "state": _state_from_row(original_row, state_col, state),
+                "zip5": zip5,
+                "range_id": str(range_id),
+            }
+        )
+
+    if not len(projected):
+        return []
+    pairs = projected.sindex.query(projected.geometry, predicate="intersects")
+    seen: set[tuple[str, str, float, float]] = set()
+    output: list[dict[str, Any]] = []
+    for left_index, right_index in zip(pairs[0], pairs[1]):
+        left_index, right_index = int(left_index), int(right_index)
+        if left_index >= right_index:
+            continue
+        left_meta, right_meta = metadata[left_index], metadata[right_index]
+        if not left_meta.get("street_norm") or not right_meta.get("street_norm"):
+            continue
+        if left_meta["street_norm"] == right_meta["street_norm"]:
+            continue
+        line_left, line_right = lines[left_index], lines[right_index]
+        if line_left is None or line_right is None:
+            continue
+        for point in _intersection_points(line_left.intersection(line_right)):
+            key = intersection_key(left_meta["street_norm"], right_meta["street_norm"])
+            x_key, y_key = round(float(point.x), 2), round(float(point.y), 2)
+            dedupe_key = (key, left_meta.get("state", ""), x_key, y_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            first, second = sorted((left_meta, right_meta), key=lambda item: item["street_norm"])
+            longitude, latitude = transformer.transform(point.x, point.y)
+            address_id = (
+                f"{source}:intersection:{key}:{x_key}:{y_key}"
+            )
+            output.append(
+                {
+                    "address_id": address_id,
+                    "range_id": f"{first['range_id']}|{second['range_id']}",
+                    "house_number": None,
+                    "parity": "intersection",
+                    "side": "I",
+                    "pre_directional": first["pre_directional"],
+                    "street_name": first["street_name"],
+                    "street_suffix": first["street_suffix"],
+                    "post_directional": first["post_directional"],
+                    "street_norm": key,
+                    "street_block": first["street_block"],
+                    "city": first["city"] or second["city"],
+                    "city_norm": first["city"] or second["city"],
+                    "state": first["state"] or second["state"],
+                    "state_norm": first["state"] or second["state"],
+                    "zip5": first["zip5"] or second["zip5"],
+                    "latitude": float(latitude),
+                    "longitude": float(longitude),
+                    "geometry_wkt": Point(float(longitude), float(latitude)).wkt,
+                    "interpolation_crs": str(projected_crs),
+                    "source": source,
+                    "source_type": source_type,
+                    "source_priority": int(source_priority),
+                    "source_record_id": address_id,
+                    "is_intersection": True,
+                    "intersection_key": key,
+                    "intersection_street_norm": second["street_norm"],
+                    "intersection_street_block": second["street_block"],
+                }
+            )
+    return output
+
+
 def prepare_ranges(
     ranges: gpd.GeoDataFrame | pd.DataFrame,
     *,
@@ -212,6 +358,13 @@ def prepare_ranges(
     source_type, source_priority:
         Provenance kind and lower-is-better tie-break priority when combining
         TIGER rows with local address or parcel references.
+
+    Notes
+    -----
+    Intersection points are geometric line crossings. TIGER/Line does not
+    reliably encode grade separation, so bridges and tunnels can produce
+    apparent intersections; set ``include_intersections=False`` when that is
+    not appropriate for the source data.
     """
 
     config = config or InterpolationConfig()
@@ -320,6 +473,10 @@ def prepare_ranges(
                 "source_type": source_type,
                 "source_priority": int(source_priority),
                 "source_record_id": str(range_id),
+                "is_intersection": False,
+                "intersection_key": "",
+                "intersection_street_norm": "",
+                "intersection_street_block": "",
             }
             output_columns["address_id"].extend(
                 f"{source}:{range_id}:{side}:{house_number}" for house_number in numbers
@@ -335,6 +492,26 @@ def prepare_ranges(
             output_columns["geometry_wkt"].extend(
                 shapely.to_wkt(points_wgs84, rounding_precision=-1).tolist()
             )
+    if config.include_intersections:
+        intersection_rows = _prepare_intersection_rows(
+            frame,
+            projected,
+            full_col=full_col,
+            state_col=state_col,
+            lzip_col=lzip_col,
+            rzip_col=rzip_col,
+            lcity_col=lcity_col,
+            rcity_col=rcity_col,
+            state=state,
+            projected_crs=str(projected_crs),
+            transformer=transformer,
+            source=source,
+            source_type=source_type,
+            source_priority=source_priority,
+        )
+        for row in intersection_rows:
+            for column in ADDRESS_COLUMNS:
+                output_columns[column].append(row.get(column))
     return pd.DataFrame(output_columns, columns=ADDRESS_COLUMNS)
 
 

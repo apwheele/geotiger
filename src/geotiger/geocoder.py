@@ -278,6 +278,10 @@ class Geocoder:
                 "city_norm",
                 "state_norm",
                 "street_block",
+                "is_intersection",
+                "intersection_street_norm",
+                "intersection_key",
+                "intersection_street_block",
             ],
         )
         parse_seconds = time.perf_counter() - parse_started
@@ -322,6 +326,8 @@ class Geocoder:
                     "state_norm",
                     "city_norm",
                     "zip5",
+                    "is_intersection",
+                    "intersection_key",
                 ]
             ]
             candidate_query = self.store.candidate_query(
@@ -477,6 +483,9 @@ class Geocoder:
                     "candidate_source_type": "matched_source_type",
                     "candidate_source_priority": "matched_source_priority",
                     "candidate_source_record_id": "matched_source_record_id",
+                    "candidate_is_intersection": "matched_is_intersection",
+                    "candidate_intersection_key": "matched_intersection_key",
+                    "candidate_intersection_street_norm": "matched_intersection_street_norm",
                     "candidate_lookup_id": "matched_lookup_id",
                     "candidate_cache_key": "matched_cache_key",
                     "candidate_match_method": "match_method",
@@ -490,6 +499,8 @@ class Geocoder:
                 "match_geometry_wkt", "matched_source", "matched_source_type",
                 "matched_source_priority", "matched_source_record_id", "score", "score_margin",
                 "candidate_count",
+                "matched_is_intersection", "matched_intersection_key",
+                "matched_intersection_street_norm",
                 "matched_lookup_id", "matched_cache_key", "match_method",
                 "match_status", "auto_assigned", "score_house_number", "score_street", "score_city",
                 "score_state", "score_zip5",
@@ -518,6 +529,9 @@ class Geocoder:
             "matched_source_type": None,
             "matched_source_priority": None,
             "matched_source_record_id": None,
+            "matched_is_intersection": False,
+            "matched_intersection_key": None,
+            "matched_intersection_street_norm": None,
             "matched_lookup_id": None,
             "matched_cache_key": None,
             "match_method": "candidate",

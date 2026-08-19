@@ -63,7 +63,11 @@ class GeoTIGERStore:
                 source VARCHAR,
                 source_type VARCHAR,
                 source_priority INTEGER,
-                source_record_id VARCHAR
+                source_record_id VARCHAR,
+                is_intersection BOOLEAN,
+                intersection_key VARCHAR,
+                intersection_street_norm VARCHAR,
+                intersection_street_block VARCHAR
             )
             """
         )
@@ -121,6 +125,15 @@ class GeoTIGERStore:
         self.connection.execute(
             "ALTER TABLE addresses ADD COLUMN IF NOT EXISTS source_record_id VARCHAR"
         )
+        for column, definition in (
+            ("is_intersection", "BOOLEAN"),
+            ("intersection_key", "VARCHAR"),
+            ("intersection_street_norm", "VARCHAR"),
+            ("intersection_street_block", "VARCHAR"),
+        ):
+            self.connection.execute(
+                f"ALTER TABLE addresses ADD COLUMN IF NOT EXISTS {column} {definition}"
+            )
         self.connection.execute(
             """
             UPDATE addresses
@@ -149,6 +162,8 @@ class GeoTIGERStore:
             "CREATE INDEX IF NOT EXISTS addresses_state_city ON addresses(state_norm, city_norm)",
             "CREATE INDEX IF NOT EXISTS addresses_house_number ON addresses(house_number)",
             "CREATE INDEX IF NOT EXISTS addresses_street_block ON addresses(street_block)",
+            "CREATE INDEX IF NOT EXISTS addresses_intersection_key ON "
+            "addresses(intersection_key)",
             "CREATE INDEX IF NOT EXISTS lookup_norm_locality ON "
             "address_lookup(lookup_norm, state_norm, city_norm, zip5)",
             "CREATE INDEX IF NOT EXISTS history_cache_key ON history_cache(cache_key)",
@@ -192,6 +207,16 @@ class GeoTIGERStore:
     def count(self) -> int:
         self.create()
         return int(self.connection.execute("SELECT count(*) FROM addresses").fetchone()[0])
+
+    def intersection_count(self) -> int:
+        """Return the number of prepared intersection points."""
+
+        self.create()
+        return int(
+            self.connection.execute(
+                "SELECT count(*) FROM addresses WHERE coalesce(is_intersection, FALSE)"
+            ).fetchone()[0]
+        )
 
     def lookup_count(self) -> int:
         """Return the number of explicit local alias mappings."""
@@ -433,6 +458,9 @@ class GeoTIGERStore:
                 a.source_type AS candidate_source_type,
                 a.source_priority AS candidate_source_priority,
                 a.source_record_id AS candidate_source_record_id,
+                coalesce(a.is_intersection, FALSE) AS candidate_is_intersection,
+                a.intersection_key AS candidate_intersection_key,
+                a.intersection_street_norm AS candidate_intersection_street_norm,
                 l.lookup_id AS candidate_lookup_id,
                 NULL::VARCHAR AS candidate_cache_key,
                 100.0::DOUBLE AS candidate_score_override,
@@ -492,6 +520,9 @@ class GeoTIGERStore:
                 a.source_type AS candidate_source_type,
                 a.source_priority AS candidate_source_priority,
                 a.source_record_id AS candidate_source_record_id,
+                coalesce(a.is_intersection, FALSE) AS candidate_is_intersection,
+                a.intersection_key AS candidate_intersection_key,
+                a.intersection_street_norm AS candidate_intersection_street_norm,
                 NULL::VARCHAR AS candidate_lookup_id,
                 h.cache_key AS candidate_cache_key,
                 100.0::DOUBLE AS candidate_score_override,
@@ -542,6 +573,21 @@ class GeoTIGERStore:
                 frame[column] = None
         frame = frame[ADDRESS_COLUMNS]
         if replace:
+            # DuckDB versions with persistent secondary indexes can reject a
+            # bulk DELETE while the indexed table is being reshaped. Drop the
+            # advisory indexes for a replacement load and recreate them after
+            # the new reference rows are inserted.
+            for index_name in (
+                "addresses_state_zip",
+                "addresses_state_city",
+                "addresses_house_number",
+                "addresses_street_block",
+                "addresses_intersection_key",
+            ):
+                try:
+                    self.connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+                except duckdb.Error:
+                    pass
             self.connection.execute("DELETE FROM addresses")
         view = f"_geotiger_load_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
@@ -551,6 +597,8 @@ class GeoTIGERStore:
             )
         finally:
             self.connection.unregister(view)
+        if replace:
+            self.create()
         return len(frame)
 
     def candidate_query(
@@ -630,17 +678,22 @@ class GeoTIGERStore:
             "state_norm",
             "city_norm",
             "zip5",
+            "is_intersection",
+            "intersection_key",
         ]
         missing = [column for column in required if column not in inputs.columns]
         if missing:
             raise ValueError(f"Parsed input is missing columns: {', '.join(missing)}")
         frame = inputs[required].copy()
         frame["house_number"] = frame["house_number"].astype("Int64")
-        for column in ("street_block", "state_norm", "city_norm", "zip5"):
+        frame["is_intersection"] = frame["is_intersection"].fillna(False).astype(bool)
+        for column in ("street_block", "state_norm", "city_norm", "zip5", "intersection_key"):
             frame[column] = frame[column].fillna("").astype(str)
         view = f"_geotiger_inputs_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
         conditions = []
+        conditions.append("coalesce(a.is_intersection, FALSE) = i.is_intersection")
+        conditions.append("(NOT i.is_intersection OR a.intersection_key = i.intersection_key)")
         for column in ("state_norm",):
             if frame[column].ne("").all():
                 conditions.append(f"a.{column} = i.{column}")
@@ -650,24 +703,22 @@ class GeoTIGERStore:
             conditions.append("a.street_norm = i.street_norm")
         elif street_blocking:
             if frame["street_block"].ne("").all():
-                conditions.append("a.street_block = i.street_block")
+                conditions.append("(i.is_intersection OR a.street_block = i.street_block)")
             else:
-                conditions.append("(i.street_block = '' OR a.street_block = i.street_block)")
+                conditions.append(
+                    "(i.is_intersection OR i.street_block = '' OR "
+                    "a.street_block = i.street_block)"
+                )
         if strict_locality:
             for column in ("city_norm", "zip5"):
                 if frame[column].ne("").all():
                     conditions.append(f"a.{column} = i.{column}")
                 else:
                     conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
-        if frame["house_number"].notna().all():
-            conditions.append(
-                f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)}"
-            )
-        else:
-            conditions.append(
-                f"(i.house_number IS NULL OR abs(a.house_number - i.house_number) <= "
-                f"{int(house_number_tolerance)})"
-            )
+        conditions.append(
+            f"(i.is_intersection OR i.house_number IS NULL OR "
+            f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)})"
+        )
         join_where = " AND ".join(conditions) or "TRUE"
         query = f"""
             SELECT
@@ -694,6 +745,9 @@ class GeoTIGERStore:
                 a.source_type AS candidate_source_type,
                 a.source_priority AS candidate_source_priority,
                 a.source_record_id AS candidate_source_record_id,
+                coalesce(a.is_intersection, FALSE) AS candidate_is_intersection,
+                a.intersection_key AS candidate_intersection_key,
+                a.intersection_street_norm AS candidate_intersection_street_norm,
                 NULL::VARCHAR AS candidate_lookup_id,
                 NULL::VARCHAR AS candidate_cache_key,
                 NULL::DOUBLE AS candidate_score_override,
