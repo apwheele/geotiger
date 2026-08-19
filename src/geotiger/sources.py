@@ -55,7 +55,10 @@ def download_tiger_ranges(
         county_column = next(
             (
                 column
-                for column in ("GEOID", "COUNTYFP", "COUNTYFP10")
+                # pygris.address_ranges expects the county component (for
+                # example ``003``), not the full state+county GEOID
+                # (``10003``).  Prefer the component when both are present.
+                for column in ("COUNTYFP", "COUNTYFP10", "GEOID")
                 if column in county_frame.columns
             ),
             None,
@@ -77,8 +80,6 @@ def download_tiger_ranges(
             if parts
             else gpd.GeoDataFrame()
         )
-        if len(combined) and "STUSPS" not in combined.columns:
-            combined["STUSPS"] = state
         return combined
     call_kwargs: dict[str, Any] = {}
     options = {"state": state, "county": county, "year": year, "cache": cache, **kwargs}
@@ -98,8 +99,6 @@ def download_tiger_ranges(
         ranges = function(*positional, **positional_kwargs)
     if not isinstance(ranges, gpd.GeoDataFrame):
         ranges = gpd.GeoDataFrame(ranges)
-    if len(ranges) and "STUSPS" not in ranges.columns:
-        ranges["STUSPS"] = state
     return ranges
 
 

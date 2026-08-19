@@ -16,11 +16,14 @@ from .normalize import normalize_text, parse_record
 from .store import GeoTIGERStore
 
 DEFAULT_WEIGHTS = {
-    "house_number": 0.40,
-    "street": 0.35,
-    "city": 0.10,
-    "state": 0.05,
-    "zip5": 0.10,
+    # State, city, and ZIP are blocking/locality checks when present. Keep
+    # them visible in the score for auditability, but let street identity and
+    # house-number proximity do most of the ranking work.
+    "house_number": 0.30,
+    "street": 0.62,
+    "city": 0.03,
+    "state": 0.02,
+    "zip5": 0.03,
 }
 
 
@@ -39,6 +42,7 @@ class GeocoderConfig:
     strict_locality: bool = True
     use_lookup_table: bool = True
     use_history_cache: bool = True
+    deduplicate_inputs: bool = False
     weights: Mapping[str, float] = field(default_factory=lambda: DEFAULT_WEIGHTS.copy())
 
 
@@ -59,6 +63,9 @@ class TimingReport:
     aggregation_seconds: float
     total_seconds: float
     threads: int
+    deduplicate_inputs: bool
+    candidate_input_count: int
+    candidate_query_input_count: int
 
     @property
     def throughput_per_second(self) -> float:
@@ -81,6 +88,9 @@ class TimingReport:
             "aggregation_seconds": round(self.aggregation_seconds, 6),
             "total_seconds": round(self.total_seconds, 6),
             "throughput_per_second": round(self.throughput_per_second, 3),
+            "deduplicate_inputs": self.deduplicate_inputs,
+            "candidate_input_count": self.candidate_input_count,
+            "candidate_query_input_count": self.candidate_query_input_count,
             "duckdb_threads": self.threads,
             "python": sys.version.split()[0],
             "platform": platform.platform(),
@@ -134,6 +144,43 @@ def _parse_cache_text(value: Any) -> str:
     except (TypeError, ValueError):
         pass
     return str(value)
+
+
+def _deduplicate_work_frame(
+    frame: pd.DataFrame,
+    key_columns: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Keep one representative input and map it back to every original row."""
+
+    representatives = frame.drop_duplicates(key_columns, keep="first").copy()
+    original = frame[key_columns + ["input_id"]].rename(
+        columns={"input_id": "original_input_id"}
+    )
+    representative_keys = representatives[key_columns + ["input_id"]].rename(
+        columns={"input_id": "representative_input_id"}
+    )
+    mapping = original.merge(
+        representative_keys,
+        on=key_columns,
+        how="left",
+        validate="many_to_one",
+    )
+    return representatives, mapping[["representative_input_id", "original_input_id"]]
+
+
+def _expand_work_candidates(
+    candidates: pd.DataFrame,
+    mapping: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Expand representative candidate rows to their original input IDs."""
+
+    if mapping is None or not len(candidates):
+        return candidates
+    expanded = candidates.rename(
+        columns={"input_id": "representative_input_id"}
+    ).merge(mapping, on="representative_input_id", how="inner")
+    expanded["input_id"] = expanded["original_input_id"]
+    return expanded.drop(columns=["representative_input_id", "original_input_id"])
 
 
 def _cache_key_series(parsed: pd.DataFrame) -> pd.Series:
@@ -313,23 +360,39 @@ class Geocoder:
         parsed_frame["cache_key"] = _cache_key_series(parsed_frame)
         cache_started = time.perf_counter()
         cache_candidates = pd.DataFrame()
+        history_mapping = None
         if self.config.use_history_cache:
+            history_inputs = parsed_frame[["input_id", "cache_key"]]
+            if self.config.deduplicate_inputs:
+                history_inputs, history_mapping = _deduplicate_work_frame(
+                    history_inputs,
+                    ["cache_key"],
+                )
             cache_candidates = self.store.history_cache_query(
-                parsed_frame[["input_id", "cache_key"]]
+                history_inputs,
             )
+            cache_candidates = _expand_work_candidates(cache_candidates, history_mapping)
         history_cache_seconds = time.perf_counter() - cache_started
         cache_ids = set(cache_candidates["input_id"].tolist()) if len(cache_candidates) else set()
 
         lookup_started = time.perf_counter()
         lookup_candidates = pd.DataFrame()
+        lookup_mapping = None
         lookup_remaining = parsed_frame.loc[~parsed_frame["input_id"].isin(cache_ids)]
         if self.config.use_lookup_table and len(lookup_remaining):
+            lookup_inputs = lookup_remaining[
+                ["input_id", "lookup_norm", "state_norm", "city_norm", "zip5"]
+            ]
+            if self.config.deduplicate_inputs:
+                lookup_inputs, lookup_mapping = _deduplicate_work_frame(
+                    lookup_inputs,
+                    ["lookup_norm", "state_norm", "city_norm", "zip5"],
+                )
             lookup_candidates = self.store.lookup_query(
-                lookup_remaining[
-                    ["input_id", "lookup_norm", "state_norm", "city_norm", "zip5"]
-                ],
+                lookup_inputs,
                 strict_locality=self.config.strict_locality,
             )
+            lookup_candidates = _expand_work_candidates(lookup_candidates, lookup_mapping)
         lookup_seconds = time.perf_counter() - lookup_started
         lookup_ids = (
             set(lookup_candidates["input_id"].tolist()) if len(lookup_candidates) else set()
@@ -339,6 +402,9 @@ class Geocoder:
         candidate_remaining = parsed_frame.loc[
             ~parsed_frame["input_id"].isin(cache_ids | lookup_ids)
         ]
+        candidate_input_count = len(candidate_remaining)
+        candidate_query_input_count = 0
+        candidate_mapping = None
         if len(candidate_remaining):
             query_inputs = candidate_remaining[
                 [
@@ -353,6 +419,21 @@ class Geocoder:
                     "intersection_key",
                 ]
             ]
+            if self.config.deduplicate_inputs:
+                query_inputs, candidate_mapping = _deduplicate_work_frame(
+                    query_inputs,
+                    [
+                        "house_number",
+                        "street_norm",
+                        "street_block",
+                        "state_norm",
+                        "city_norm",
+                        "zip5",
+                        "is_intersection",
+                        "intersection_key",
+                    ],
+                )
+            candidate_query_input_count = len(query_inputs)
             candidate_query = self.store.candidate_query(
                 query_inputs,
                 house_number_tolerance=self.config.house_number_tolerance,
@@ -362,6 +443,7 @@ class Geocoder:
                 exact_house_number_first=self.config.exact_house_number_first,
                 street_fallback=self.config.street_fallback,
             )
+            candidate_query = _expand_work_candidates(candidate_query, candidate_mapping)
         else:
             candidate_query = pd.DataFrame()
         candidate_query_seconds = time.perf_counter() - query_started
@@ -413,6 +495,9 @@ class Geocoder:
             aggregation_seconds=aggregation_seconds,
             total_seconds=total_seconds,
             threads=self.store.threads,
+            deduplicate_inputs=self.config.deduplicate_inputs,
+            candidate_input_count=candidate_input_count,
+            candidate_query_input_count=candidate_query_input_count,
         )
         return GeocodeResult(
             matches=matches,

@@ -1,7 +1,11 @@
 from conftest import make_range_frame
 from shapely.geometry import LineString
 
-from geotiger import InterpolationConfig, prepare_ranges
+from geotiger import InterpolationConfig, prepare_ranges, state_plane_crs
+
+
+def test_dc_uses_local_state_plane_projection():
+    assert state_plane_crs("DC") == "EPSG:2248"
 
 
 def test_prepare_ranges_expands_parity_and_both_sides():

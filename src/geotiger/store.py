@@ -26,6 +26,7 @@ class GeoTIGERStore:
         self.path = str(path)
         self.threads = max(1, threads or (os.cpu_count() or 1))
         self._connection: duckdb.DuckDBPyConnection | None = None
+        self._intersection_table_initialized = False
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
@@ -135,6 +136,20 @@ class GeoTIGERStore:
                 f"ALTER TABLE addresses ADD COLUMN IF NOT EXISTS {column} {definition}"
             )
         self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS address_intersections AS "
+            "SELECT * FROM addresses WHERE FALSE"
+        )
+        if not self._intersection_table_initialized:
+            if self.connection.execute(
+                "SELECT count(*) FROM address_intersections"
+            ).fetchone()[0] == 0:
+                self.connection.execute(
+                    "INSERT INTO address_intersections SELECT "
+                    f"{', '.join(ADDRESS_COLUMNS)} FROM addresses "
+                    "WHERE is_intersection IS TRUE"
+                )
+            self._intersection_table_initialized = True
+        self.connection.execute(
             """
             UPDATE addresses
             SET source_type = CASE
@@ -164,6 +179,8 @@ class GeoTIGERStore:
             "CREATE INDEX IF NOT EXISTS addresses_street_block ON addresses(street_block)",
             "CREATE INDEX IF NOT EXISTS addresses_intersection_key ON "
             "addresses(intersection_key)",
+            "CREATE INDEX IF NOT EXISTS address_intersections_key ON "
+            "address_intersections(intersection_key)",
             "CREATE INDEX IF NOT EXISTS lookup_norm_locality ON "
             "address_lookup(lookup_norm, state_norm, city_norm, zip5)",
             "CREATE INDEX IF NOT EXISTS history_cache_key ON history_cache(cache_key)",
@@ -214,7 +231,7 @@ class GeoTIGERStore:
         self.create()
         return int(
             self.connection.execute(
-                "SELECT count(*) FROM addresses WHERE coalesce(is_intersection, FALSE)"
+                "SELECT count(*) FROM address_intersections"
             ).fetchone()[0]
         )
 
@@ -583,17 +600,24 @@ class GeoTIGERStore:
                 "addresses_house_number",
                 "addresses_street_block",
                 "addresses_intersection_key",
+                "address_intersections_key",
             ):
                 try:
                     self.connection.execute(f"DROP INDEX IF EXISTS {index_name}")
                 except duckdb.Error:
                     pass
             self.connection.execute("DELETE FROM addresses")
+            self.connection.execute("DELETE FROM address_intersections")
         view = f"_geotiger_load_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
         try:
             self.connection.execute(
                 f"INSERT INTO addresses SELECT {', '.join(ADDRESS_COLUMNS)} FROM {view}"
+            )
+            self.connection.execute(
+                "INSERT INTO address_intersections SELECT "
+                f"{', '.join(ADDRESS_COLUMNS)} FROM {view} "
+                "WHERE is_intersection IS TRUE"
             )
         finally:
             self.connection.unregister(view)
@@ -611,6 +635,7 @@ class GeoTIGERStore:
         exact_street_first: bool = True,
         exact_house_number_first: bool = True,
         exact_street: bool = False,
+        compact_street: bool = False,
         street_fallback: bool = True,
         _intersection_only: bool = False,
     ) -> pd.DataFrame:
@@ -632,6 +657,7 @@ class GeoTIGERStore:
                     exact_street_first=False,
                     exact_house_number_first=False,
                     exact_street=True,
+                    compact_street=False,
                     street_fallback=False,
                     _intersection_only=True,
                 )
@@ -646,6 +672,7 @@ class GeoTIGERStore:
                     exact_street_first=exact_street_first,
                     exact_house_number_first=exact_house_number_first,
                     exact_street=exact_street,
+                    compact_street=compact_street,
                     street_fallback=street_fallback,
                 )
                 candidate_frames = [
@@ -671,11 +698,36 @@ class GeoTIGERStore:
                 exact_street_first=False,
                 exact_house_number_first=exact_house_number_first,
                 exact_street=True,
+                compact_street=False,
             )
             found = set(exact["input_id"].tolist()) if len(exact) else set()
             remaining = inputs.loc[~inputs["input_id"].isin(found)]
+            compact = pd.DataFrame()
+            if len(remaining):
+                compact = self.candidate_query(
+                    remaining,
+                    house_number_tolerance=house_number_tolerance,
+                    street_blocking=street_blocking,
+                    strict_locality=strict_locality,
+                    exact_street_first=False,
+                    exact_house_number_first=exact_house_number_first,
+                    exact_street=True,
+                    compact_street=True,
+                    street_fallback=False,
+                )
+                compact_found = set(compact["input_id"].tolist()) if len(compact) else set()
+                remaining = remaining.loc[~remaining["input_id"].isin(compact_found)]
+            exact_frames = [
+                candidate_frame
+                for candidate_frame in (exact, compact)
+                if len(candidate_frame)
+            ]
             if not len(remaining) or not street_fallback:
-                return exact
+                return (
+                    pd.concat(exact_frames, ignore_index=True)
+                    if exact_frames
+                    else pd.DataFrame()
+                )
             fallback = self.candidate_query(
                 remaining,
                 house_number_tolerance=house_number_tolerance,
@@ -686,7 +738,7 @@ class GeoTIGERStore:
                 exact_street=False,
                 street_fallback=street_fallback,
             )
-            return pd.concat([exact, fallback], ignore_index=True)
+            return pd.concat([*exact_frames, fallback], ignore_index=True)
         if exact_house_number_first and house_number_tolerance > 0:
             exact = self.candidate_query(
                 inputs,
@@ -696,6 +748,7 @@ class GeoTIGERStore:
                 exact_street_first=False,
                 exact_house_number_first=False,
                 exact_street=exact_street,
+                compact_street=compact_street,
             )
             found = set(exact["input_id"].tolist()) if len(exact) else set()
             remaining = inputs.loc[~inputs["input_id"].isin(found)]
@@ -709,6 +762,7 @@ class GeoTIGERStore:
                 exact_street_first=False,
                 exact_house_number_first=False,
                 exact_street=exact_street,
+                compact_street=compact_street,
             )
             return pd.concat([exact, fallback], ignore_index=True)
         required = [
@@ -749,7 +803,17 @@ class GeoTIGERStore:
                 conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
         if not _intersection_only:
             if exact_street:
-                conditions.append("a.street_norm = i.street_norm")
+                if compact_street:
+                    # Treat spacing-only variants such as ``SNOWCREST TRL``
+                    # and ``SNOW CREST TRL`` as the same normalized street.
+                    # This branch only receives rows unresolved by the fast
+                    # exact-street pass.
+                    conditions.append("a.street_block = i.street_block")
+                    conditions.append(
+                        "replace(a.street_norm, ' ', '') = replace(i.street_norm, ' ', '')"
+                    )
+                else:
+                    conditions.append("a.street_norm = i.street_norm")
             elif street_blocking:
                 if frame["street_block"].ne("").all():
                     conditions.append("a.street_block = i.street_block")
@@ -767,6 +831,7 @@ class GeoTIGERStore:
                 f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)})"
             )
         join_where = " AND ".join(conditions) or "TRUE"
+        reference_table = "address_intersections" if _intersection_only else "addresses"
         query = f"""
             SELECT
                 i.input_id,
@@ -800,7 +865,7 @@ class GeoTIGERStore:
                 NULL::DOUBLE AS candidate_score_override,
                 'candidate'::VARCHAR AS candidate_match_method
             FROM {view} i
-            INNER JOIN addresses a
+            INNER JOIN {reference_table} a
               ON {join_where}
         """
         try:

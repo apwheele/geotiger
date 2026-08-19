@@ -19,6 +19,9 @@ STATE_PLANE_CRS = {
     "SC": "EPSG:2273",  # NAD83 / South Carolina (ft)
     "TN": "EPSG:2274",  # NAD83 / Tennessee (ftUS)
     "MD": "EPSG:2248",  # NAD83 / Maryland (ftUS)
+    # The District of Columbia is covered by the Maryland State Plane
+    # coordinate system in the EPSG registry; use its US-foot realization.
+    "DC": "EPSG:2248",
     "DE": "EPSG:2243",  # NAD83 / Delaware (ftUS)
     "NJ": "EPSG:3424",  # NAD83 / New Jersey (ftUS)
     "PA": "EPSG:2272",  # NAD83 / Pennsylvania South (ftUS)

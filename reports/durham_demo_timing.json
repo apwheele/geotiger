@@ -2,22 +2,38 @@
   "input_rows": 135088,
   "reference_rows": 1550226,
   "intersection_rows": 7622,
-  "prepare_seconds": 26.602,
+  "prepare_seconds": 25.784,
   "interpolation_crs": "EPSG:2264",
   "end_offset_m": 0,
   "side_offset_m": 0,
   "include_intersections": true,
   "strict_locality": false,
   "street_fallback": false,
-  "candidate_rows": 284975,
-  "matched": 115919,
+  "candidate_rows": 286305,
+  "matched": 116649,
   "review": 10,
-  "unmatched": 19159,
-  "parse_seconds": 3.968838,
-  "candidate_query_seconds": 6.464592,
-  "scoring_seconds": 0.142251,
-  "aggregation_seconds": 0.546209,
-  "geocode_seconds": 11.855995,
-  "throughput_per_second": 11394.067,
-  "duckdb_threads": 4
+  "unmatched": 18429,
+  "parse_seconds": 4.178806,
+  "candidate_query_seconds": 8.343722,
+  "scoring_seconds": 0.159813,
+  "aggregation_seconds": 0.517316,
+  "geocode_seconds": 13.929703,
+  "throughput_per_second": 9697.838,
+  "duckdb_threads": 4,
+  "deduplication_benchmark": {
+    "non_deduplicated": {
+      "candidate_query_seconds": 6.9956,
+      "geocode_seconds": 15.68676,
+      "throughput_per_second": 8611.594,
+      "candidate_input_count": 135088,
+      "candidate_query_input_count": 135088
+    },
+    "deduplicated": {
+      "candidate_query_seconds": 1.277235,
+      "geocode_seconds": 6.807597,
+      "throughput_per_second": 19843.712,
+      "candidate_input_count": 135088,
+      "candidate_query_input_count": 12841
+    }
+  }
 }

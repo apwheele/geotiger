@@ -73,10 +73,17 @@ _SUFFIXES = {
     "RD": "RD",
     "AVE": "AVE",
     "BLVD": "BLVD",
+    "CIR": "CIR",
     "DR": "DR",
     "LN": "LN",
     "HWY": "HWY",
     "PKWY": "PKWY",
+    "PL": "PL",
+    "RTE": "RTE",
+    "SQ": "SQ",
+    "TER": "TER",
+    "TRL": "TRL",
+    "TPKE": "TPKE",
 }
 
 _STATE_ALIASES = {

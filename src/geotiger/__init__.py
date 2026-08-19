@@ -1,7 +1,6 @@
 """GeoTIGER: local-first US geocoding from TIGER/Line address ranges."""
 
 from .combined import CombinedGeocoder
-from .demo_data import DURHAM_CRIME_URL, load_durham_crime, make_durham_inputs, midpoint_address
 from .geocoder import Geocoder, GeocoderConfig, GeocodeResult, TimingReport
 from .interpolate import InterpolationConfig, prepare_ranges
 from .normalize import (
@@ -29,11 +28,7 @@ __all__ = [
     "TimingReport",
     "download_tiger_ranges",
     "DEFAULT_FALLBACK_CRS",
-    "DURHAM_CRIME_URL",
     "load_ranges",
-    "load_durham_crime",
-    "make_durham_inputs",
-    "midpoint_address",
     "matches_map",
     "matches_static_map",
     "normalize_text",
