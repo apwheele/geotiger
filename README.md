@@ -107,8 +107,9 @@ same DuckDB file to limit peak memory use.
 - [DC five-address demo](notebooks/dc_five_addresses_demo.ipynb): downloads and
   prepares DC TIGER data, geocodes five coordinate-free inputs, and renders a
   static offline map plus a Folium map with optional OpenStreetMap tiles.
-- [Durham crime demo](notebooks/durham_demo.ipynb): prepares Durham TIGER data
-  and geocodes the large public crime table locally.
+- [Durham crime demo](notebooks/durham_demo.ipynb): combines Durham, Orange,
+  and Wake County TIGER data into one geocoder and processes the large public
+  Durham crime table locally.
 - [Statewide TIGER demo](notebooks/statewide_tiger_demo.ipynb): builds a whole
   Delaware reference with `county=None`, times 10,000 randomized statewide
   inputs with controlled errors, and maps a statewide sample.

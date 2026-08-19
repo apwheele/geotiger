@@ -1,0 +1,127 @@
+GEOTIGER PYPI RELEASE PLAN
+==========================
+
+Current status
+--------------
+
+- Public repository: https://github.com/apwheele/geotiger
+- Package name: geotiger (appeared available on PyPI when checked on
+  August 19, 2026, but is not reserved until the first successful upload)
+- Planned first version: 0.1.0
+- Local verification: 43 tests passing with 84.36% branch coverage
+- The package builds successfully as a wheel and source distribution.
+
+Repository work before publishing
+---------------------------------
+
+1. Pin the build backend to a compatible Hatchling version.
+
+   The current unconstrained Hatchling installation emits Core Metadata 2.5.
+   That metadata version is valid, but Twine 6.2.0 rejected it during the local
+   release check. Pin Hatchling 1.29.0 (or another verified release that emits
+   Core Metadata 2.4), rebuild, and run Twine's check again.
+
+   Suggested pyproject.toml setting:
+
+       [build-system]
+       requires = ["hatchling==1.29.0"]
+       build-backend = "hatchling.build"
+
+2. Improve the project metadata in pyproject.toml.
+
+   - Replace the license table with the current SPDX form: license = "MIT".
+   - Include the LICENSE file in package metadata.
+   - Add Homepage, Repository, Issues, and Documentation project URLs.
+   - Add classifiers for the supported Python versions and GIS topic.
+   - Replace the generic contributor author with the desired author name and
+     optional contact email.
+   - Confirm that version 0.1.0 and the public API are ready. Published files
+     for a version cannot be replaced with different files later.
+
+3. Add continuous integration.
+
+   Add a GitHub Actions workflow that installs the locked development
+   environment and runs Ruff, pytest, and the coverage threshold on every pull
+   request and push. Test every Python version claimed in requires-python, or
+   narrow the declared range to the versions covered by CI.
+
+4. Add a release workflow.
+
+   Add a separate .github/workflows/publish.yml workflow that:
+
+   - runs only for version tags or published GitHub releases;
+   - builds the wheel and source distribution once;
+   - verifies both artifacts;
+   - passes the artifacts to a separate publish job;
+   - uses pypa/gh-action-pypi-publish@release/v1;
+   - grants id-token: write only to the publishing job;
+   - publishes through the protected GitHub environment named pypi.
+
+5. Consider slimming the source distribution.
+
+   The current wheel is about 49 KB, while the source distribution is about
+   5.2 MB because it includes executed notebooks, reports, tests, and notebook
+   assets. This is not a release blocker. If desired, configure Hatch's sdist
+   include/exclude rules while keeping the demonstrations available on GitHub.
+
+PyPI account setup (repository owner)
+-------------------------------------
+
+1. Create or sign in to a PyPI account at https://pypi.org/.
+2. Enable two-factor authentication.
+3. Create a pending Trusted Publisher with these values:
+
+       PyPI project name: geotiger
+       GitHub owner:      apwheele
+       GitHub repository: geotiger
+       Workflow filename: publish.yml
+       Environment name:  pypi
+
+   Pending publisher instructions:
+   https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/
+
+4. In the GitHub repository, create an environment named pypi. Adding a
+   required reviewer is recommended so a workflow cannot publish without an
+   explicit approval.
+
+Test release
+------------
+
+1. Optionally create a separate TestPyPI account and Trusted Publisher. PyPI
+   and TestPyPI use separate accounts and project configurations.
+2. Build from a clean checkout:
+
+       uv build
+
+3. Validate the distributions:
+
+       uvx twine check dist/*
+
+4. Publish to TestPyPI through its Trusted Publisher workflow.
+5. Install into a fresh environment using TestPyPI and run a small geocoding
+   smoke test. Dependencies may still need to come from regular PyPI.
+
+Production release
+------------------
+
+1. Ensure main is clean, CI is green, and the release commit is pushed.
+2. Create and push the first version tag:
+
+       git tag -a v0.1.0 -m "GeoTIGER 0.1.0"
+       git push origin v0.1.0
+
+3. Approve the protected pypi publishing environment when prompted.
+4. Verify the project page and package metadata on PyPI.
+5. Install from PyPI in a new environment and run the documented five-address
+   DC example as a final smoke test.
+6. Create GitHub release notes for v0.1.0 and link to the PyPI project.
+
+Official references
+-------------------
+
+- Packaging and GitHub Actions publishing guide:
+  https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
+- PyPI Trusted Publishers:
+  https://docs.pypi.org/trusted-publishers/
+- Core metadata specification:
+  https://packaging.python.org/en/latest/specifications/core-metadata/

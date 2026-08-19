@@ -1,39 +1,49 @@
 {
   "input_rows": 135088,
-  "reference_rows": 1550226,
-  "intersection_rows": 7622,
-  "prepare_seconds": 28.333,
+  "counties": {
+    "Durham": 15799,
+    "Orange": 9777,
+    "Wake": 58130
+  },
+  "tiger_segment_rows": 83706,
+  "reference_rows": 7698884,
+  "intersection_rows": 37410,
+  "prepare_seconds": 168.31,
   "interpolation_crs": "EPSG:2264",
   "end_offset_m": 0,
   "side_offset_m": 0,
   "include_intersections": true,
+  "known_source_corrections": [
+    {
+      "county": "Wake",
+      "tlid": "648350258",
+      "street": "Weymouth Woods Trl",
+      "field": "RFROMHN",
+      "source_value": "25799",
+      "working_value": "2799"
+    }
+  ],
   "strict_locality": false,
   "street_fallback": false,
-  "candidate_rows": 311243,
-  "matched": 126061,
-  "review": 302,
-  "unmatched": 8725,
-  "parse_seconds": 1.925949,
-  "candidate_query_seconds": 2.185418,
-  "scoring_seconds": 0.897737,
-  "aggregation_seconds": 0.592277,
-  "geocode_seconds": 6.449062,
-  "throughput_per_second": 20946.923,
+  "candidate_rows": 339768,
+  "matched": 126735,
+  "review": 370,
+  "unmatched": 7983,
   "duckdb_threads": 4,
   "deduplication_benchmark": {
     "non_deduplicated": {
-      "parse_seconds": 4.92825,
-      "candidate_query_seconds": 9.905733,
-      "geocode_seconds": 17.075973,
-      "throughput_per_second": 7910.999,
+      "parse_seconds": 4.84784,
+      "candidate_query_seconds": 12.749124,
+      "geocode_seconds": 20.423455,
+      "throughput_per_second": 6614.356,
       "candidate_input_count": 135088,
       "candidate_query_input_count": 135088
     },
     "deduplicated": {
-      "parse_seconds": 1.925949,
-      "candidate_query_seconds": 2.185418,
-      "geocode_seconds": 6.449062,
-      "throughput_per_second": 20946.923,
+      "parse_seconds": 1.764314,
+      "candidate_query_seconds": 4.571441,
+      "geocode_seconds": 9.829179,
+      "throughput_per_second": 13743.569,
       "candidate_input_count": 135088,
       "candidate_query_input_count": 12841
     }

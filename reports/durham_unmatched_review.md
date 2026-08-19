@@ -1,9 +1,10 @@
 # Durham demo unmatched review
 
-The current cached Durham run has 135,088 input records. It returns 126,061
-automatic matches, 302 review records, and 8,725 unmatched records. The
-unmatched rate is **6.46%**, down from 13.64% before component-aware street
-matching.
+The current cached Durham run has 135,088 input records and uses one reference
+built from Durham, Orange, and Wake County TIGER ranges. It returns 126,735
+automatic matches, 370 review records, and 7,983 unmatched records. The
+unmatched rate is **5.91%**, down from 6.46% with a Durham County-only
+reference and 13.64% before component-aware street matching.
 
 The parser retains street name, suffix, and directional components. Candidate
 blocking now tries, in order:
@@ -24,14 +25,14 @@ penalized and generally sent to review.
 
 | Candidate method | Matched | Review | Unmatched |
 | --- | ---: | ---: | ---: |
-| Exact street | 111,517 | 10 | 0 |
-| Spacing variant | 726 | 4 | 0 |
-| Canonical street/route | 8,372 | 220 | 0 |
-| Phonetic street name | 290 | 44 | 767 |
-| Exact intersection | 4,402 | 0 | 0 |
+| Exact street | 112,092 | 10 | 0 |
+| Spacing variant | 730 | 4 | 0 |
+| Canonical street/route | 8,463 | 184 | 0 |
+| Phonetic street name | 293 | 147 | 1,304 |
+| Exact intersection | 4,403 | 0 | 0 |
 | Canonical intersection | 746 | 0 | 0 |
-| Phonetic intersection | 8 | 24 | 3 |
-| No candidate | 0 | 0 | 7,955 |
+| Phonetic intersection | 8 | 25 | 5 |
+| No candidate | 0 | 0 | 6,674 |
 
 The method is retained in `match_method`, and component scores are retained in
 `score_street_name`, `score_street_suffix`, `score_directional`,
@@ -62,19 +63,19 @@ The remaining misses partition as follows:
 
 | Cause | Records | Share of misses |
 | --- | ---: | ---: |
-| Ordinary address with zero candidates | 5,297 | 60.71% |
-| Intersection unavailable or too weak | 1,566 | 17.95% |
-| Zero or missing house number | 1,254 | 14.37% |
-| Ordinary candidate scored below review | 608 | 6.97% |
+| Ordinary address with zero candidates | 4,231 | 53.00% |
+| Intersection unavailable or too weak | 1,564 | 19.59% |
+| Zero or missing house number | 1,099 | 13.77% |
+| Ordinary candidate scored below review | 1,089 | 13.64% |
 
-The 8,725 rows represent 2,469 unique raw addresses, so repeated block labels
+The 7,983 rows represent 2,312 unique raw addresses, so repeated block labels
 still dominate row counts. Examples include `1250 BRIAR ROSE LN`, whose
 nearest prepared range ends at 1199, and new/private or source-specific names
 such as `YUNUS RD`. These are reference-coverage or range-window issues rather
 than suffix or one-letter spelling failures.
 
-Of 6,746 intersection inputs, 5,156 now match automatically, 24 go to review,
-and 1,566 remain unmatched. An authoritative local centerline/intersection
+Of 6,746 intersection inputs, 5,157 now match automatically, 25 go to review,
+and 1,564 remain unmatched. An authoritative local centerline/intersection
 table can improve the remainder where TIGER geometry is disconnected or where
 an interchange is not a true at-grade crossing.
 

@@ -1,54 +1,49 @@
 # Durham full-data demo timing
 
-This run used the cached public Durham crime table and cached Durham County
-TIGER/Line ranges on the development workstation.
+This run used the cached public Durham crime table and one local geocoder built
+from the 2024 TIGER/Line ranges for Durham, Orange, and Wake Counties. Each
+county's direct `pygris` result was cached separately and concatenated in
+memory. The working frame corrects the one known Wake TIGER typo on Weymouth
+Woods Trail (`25799` to `2799`); the downloaded cache remains unchanged.
 
 | Quantity | Value |
 | --- | ---: |
 | Crime input rows | 135,088 |
-| Expanded reference rows | 1,550,226 |
-| Prepared intersection points | 7,622 |
+| Durham County TIGER segments | 15,799 |
+| Orange County TIGER segments | 9,777 |
+| Wake County TIGER segments | 58,130 |
+| Combined TIGER segments | 83,706 |
+| Expanded reference rows | 7,698,884 |
+| Prepared intersection points | 37,410 |
 | Interpolation CRS | EPSG:2264 |
 | Interpolation offsets | 0 m end / 0 m side |
 | DuckDB threads | 4 |
-| Candidate rows | 311,243 |
-| Automatic matches | 126,061 |
-| Review | 302 |
-| Unmatched | 8,725 |
+| Candidate rows, deduplicated run | 339,768 |
+| Automatic matches | 126,735 |
+| Review | 370 |
+| Unmatched | 7,983 |
 
-| Phase | Seconds |
-| --- | ---: |
-| TIGER preparation with intersections (fresh, vectorized) | 28.333 |
-| Input parsing (deduplicated) | 1.926 |
-| DuckDB candidate query | 2.185 |
-| Component-aware fuzzy scoring | 0.898 |
-| Aggregation | 0.592 |
-| Geocoding total | 6.449 |
+The fresh, vectorized preparation with intersections took **168.31 seconds**
+on the development workstation. This is a one-time operation; subsequent runs
+read the prepared Parquet table and DuckDB database from the local cache.
 
-The main deduplicated geocoding pass processed **20,947 input rows/second**.
-Blocking partitions intersections from ordinary addresses and tries exact,
-spacing, canonical-name/route, and phonetic keys in progressively broader
-indexed passes. The broad street-signature fallback remains disabled. Street
-name, suffix, and directional components are scored separately, and
-`match_method` identifies the pass that supplied each candidate.
+## Geocoding timing
 
-With `deduplicate_inputs=True`, repeated address/locality combinations are
-parsed and queried once, then expanded back to every original input row. The
-one-time TIGER expansion is separate from geocoding and is cached locally
-afterward. A fresh expansion of the same 15,799 segments took 28.333 seconds,
-produced 1,550,226 rows including 7,622 intersections, and populated all
-canonical and phonetic keys.
-
-## Repeated-input benchmark
-
-On the same 135,088-row input, both modes returned 126,061 matches, 302 review
-rows, and 8,725 unmatched rows:
+Both modes returned the same 126,735 matches, 370 review rows, and 7,983
+unmatched rows:
 
 | Mode | Candidate-query inputs | Parse | Candidate query | Total geocode | Throughput |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Normal | 135,088 | 4.928 s | 9.906 s | 17.076 s | 7,911/s |
-| `deduplicate_inputs=True` | 12,841 | 1.926 s | 2.185 s | 6.449 s | 20,947/s |
+| Normal | 135,088 | 4.848 s | 12.749 s | 20.423 s | 6,614/s |
+| `deduplicate_inputs=True` | 12,841 | 1.764 s | 4.571 s | 9.829 s | 13,744/s |
 
-The intersection-only join now reads the separate `address_intersections`
-table. This is more useful for the bulk hash join than a conventional index on
-the mixed table; the main address table still handles ordinary street inputs.
+Blocking partitions intersections from ordinary addresses and tries exact,
+spacing, canonical-name/route, and phonetic keys in progressively broader
+indexed passes. The broad street-signature fallback remains disabled. With
+deduplication, repeated address/locality combinations are parsed and queried
+once, then expanded back to every original crime record.
+
+Relative to the former Durham County-only reference, the combined geocoder
+adds 674 automatic matches and reduces unmatched records by 742. The larger
+DuckDB tables make candidate retrieval slower, but the deduplicated run remains
+above the package's 10,000-records-per-second target on this workload.
