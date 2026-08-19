@@ -15,6 +15,7 @@ from .prepare import prepare_addresses, prepare_combined, prepare_parcels, save_
 from .sources import download_tiger_ranges, load_ranges, save_ranges
 from .state_plane import DEFAULT_FALLBACK_CRS, state_plane_crs
 from .store import GeoTIGERStore
+from .viz import matches_map, matches_static_map
 
 __all__ = [
     "GeocodeResult",
@@ -32,6 +33,8 @@ __all__ = [
     "load_durham_crime",
     "make_durham_inputs",
     "midpoint_address",
+    "matches_map",
+    "matches_static_map",
     "normalize_text",
     "normalize_state",
     "parse_address",

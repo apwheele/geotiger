@@ -49,3 +49,45 @@ def matches_map(
         ).add_to(fmap)
     return fmap
 
+
+def matches_static_map(
+    matches: pd.DataFrame,
+    *,
+    ax=None,
+    figsize: tuple[float, float] = (8, 8),
+    color_by: str = "match_status",
+    point_size: float = 28,
+):
+    """Plot matched coordinates as a static, fully offline Matplotlib map.
+
+    The result is an ``Axes`` object so analysts can add local boundaries,
+    roads, or export it with ``ax.figure.savefig(...)``. No basemap or network
+    request is used.
+    """
+
+    import matplotlib.pyplot as plt
+
+    valid = matches.dropna(subset=["match_latitude", "match_longitude"]).copy()
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+    colors = {"matched": "#2ca02c", "review": "#ff7f0e", "unmatched": "#d62728"}
+    if len(valid):
+        for status, group in valid.groupby(color_by, dropna=False):
+            label = str(status) if pd.notna(status) else "unknown"
+            ax.scatter(
+                group["match_longitude"],
+                group["match_latitude"],
+                s=point_size,
+                alpha=0.8,
+                color=colors.get(label, "#1f77b4"),
+                label=label,
+            )
+        ax.legend(title=color_by)
+        ax.set_aspect("equal", adjustable="datalim")
+    else:
+        ax.text(0.5, 0.5, "No geocoded coordinates", ha="center", va="center")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title("GeoTIGER geocoded results")
+    ax.grid(True, alpha=0.25)
+    return ax

@@ -22,8 +22,8 @@ hosted geocoding API or desktop GIS geocoder:
   Levenshtein scores locally.
 - Every potential candidate is returned, alongside the best match, score,
   margin, status, and run timings.
-- Folium maps are generated without a default basemap, so viewing a result does
-  not require sending data to a tile service.
+- Folium maps and static Matplotlib maps are generated without a default
+  basemap, so viewing a result does not require sending data to a tile service.
 
 ## Quick start
 
@@ -248,6 +248,13 @@ Run the full Durham demonstration with JupyterLab:
 uv sync --extra dev --extra demo
 uv run jupyter lab notebooks/durham_demo.ipynb
 ```
+
+For a minimal five-row workflow using Washington, DC address points, open
+[`notebooks/dc_five_addresses_demo.ipynb`](notebooks/dc_five_addresses_demo.ipynb).
+It shows preparation, local geocoding, timings, an offline static map, and an
+offline Folium map. The Durham notebook includes an embedded unmatched-record
+diagnostic; the written review is in
+[`reports/durham_unmatched_review.md`](reports/durham_unmatched_review.md).
 
 The compact public-data cache is included under
 [`notebooks/assets`](notebooks/assets). Prepared DuckDB and geocoded outputs

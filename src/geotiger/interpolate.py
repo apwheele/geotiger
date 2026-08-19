@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+import shapely
 from pyproj import CRS, Transformer
 from shapely import wkt
 from shapely.geometry import LineString, MultiLineString, Point
@@ -21,7 +23,7 @@ from .normalize import (
     parse_address,
     street_block_key,
 )
-from .schema import normalize_source_type
+from .schema import ADDRESS_COLUMNS, normalize_source_type
 from .state_plane import state_plane_crs
 
 
@@ -142,6 +144,40 @@ def _offset_point(line: LineString, distance: float, side: str, offset: float) -
     return Point(point.x + direction * offset * left_x, point.y + direction * offset * left_y)
 
 
+def _offset_points(
+    line: LineString,
+    distances: np.ndarray,
+    side: str,
+    offset: float,
+) -> np.ndarray:
+    """Vectorized equivalent of :func:`_offset_point` for a range side.
+
+    TIGER ranges commonly expand to tens of thousands of points. Keeping the
+    interpolation and local tangent calculation in Shapely's vectorized
+    ufuncs avoids one Python/Shapely/pyproj call per generated address.
+    """
+
+    points = shapely.line_interpolate_point(line, distances)
+    if offset == 0:
+        return points
+    length = line.length
+    epsilon = min(max(length / 10_000, 0.01), 2.0)
+    before = shapely.line_interpolate_point(line, np.maximum(distances - epsilon, 0.0))
+    after = shapely.line_interpolate_point(line, np.minimum(distances + epsilon, length))
+    point_x = shapely.get_x(points)
+    point_y = shapely.get_y(points)
+    dx = shapely.get_x(after) - shapely.get_x(before)
+    dy = shapely.get_y(after) - shapely.get_y(before)
+    norm = np.hypot(dx, dy)
+    direction = 1.0 if side == "L" else -1.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        offset_x = point_x + direction * offset * (-dy / norm)
+        offset_y = point_y + direction * offset * (dx / norm)
+    offset_x = np.where(norm == 0, point_x, offset_x)
+    offset_y = np.where(norm == 0, point_y, offset_y)
+    return shapely.points(offset_x, offset_y)
+
+
 def _street_parts(full_name: Any) -> tuple[str, str, str, str]:
     parsed = parse_address(f"1 {full_name}")
     return parsed.pre_directional, parsed.street_name, parsed.street_suffix, parsed.post_directional
@@ -205,7 +241,7 @@ def prepare_ranges(
         config.output_crs,
         always_xy=True,
     )
-    output_rows: list[dict[str, Any]] = []
+    output_columns: dict[str, list[Any]] = {column: [] for column in ADDRESS_COLUMNS}
     full_col = _column(frame, "full_name", required=True)
     lf_col = _column(frame, "left_from", required=True)
     lt_col = _column(frame, "left_to", required=True)
@@ -213,6 +249,12 @@ def prepare_ranges(
     rt_col = _column(frame, "right_to", required=True)
     lzip_col, rzip_col = _column(frame, "left_zip"), _column(frame, "right_zip")
     lcity_col, rcity_col = _column(frame, "left_city"), _column(frame, "right_city")
+
+    id_columns = {str(col).upper(): col for col in frame.columns}
+    stable_id_col = next(
+        (id_columns[name] for name in ("TLID", "LINEARID", "RANGE_ID", "ID") if name in id_columns),
+        None,
+    )
 
     for row_number, (original, projected_row) in enumerate(
         zip(frame.itertuples(index=False), projected.itertuples(index=False))
@@ -227,13 +269,7 @@ def prepare_ranges(
         if not street_name:
             continue
         state_value = _state_from_row(original_row, state_col, state)
-        range_id = _value(original_row, _column(frame, "full_name"), row_number)
-        # Prefer a stable source row id when present.
-        for id_col in ("TLID", "LINEARID", "RANGE_ID", "ID"):
-            matches = {str(col).upper(): col for col in frame.columns}
-            if id_col in matches:
-                range_id = _value(original_row, matches[id_col], row_number)
-                break
+        range_id = _value(original_row, stable_id_col, row_number)
         end_offset = max(float(config.end_offset_m), 0.0) * distance_units_per_meter
         side_offset = max(float(config.side_offset_m), 0.0) * distance_units_per_meter
         offset = min(end_offset, line.length * 0.49)
@@ -245,48 +281,61 @@ def prepare_ranges(
         ):
             start = _number(_value(original_row, start_col))
             end = _number(_value(original_row, end_col))
-            numbers = _range_numbers(start, end, config.max_addresses_per_range)
-            if not numbers:
+            number_values = _range_numbers(start, end, config.max_addresses_per_range)
+            if not number_values:
                 continue
+            numbers = np.asarray(number_values, dtype=np.int64)
             zip5 = normalize_zip(_value(original_row, zip_col))
             city = normalize_text(_value(original_row, city_col))
-            for house_number in numbers:
-                fraction = 0.0 if start == end else (house_number - start) / (end - start)
-                fraction = max(0.0, min(1.0, fraction))
-                distance = offset + fraction * usable_length
-                point_projected = _offset_point(line, distance, side, side_offset)
-                longitude, latitude = transformer.transform(point_projected.x, point_projected.y)
-                output_rows.append(
-                    {
-                        "address_id": f"{source}:{range_id}:{side}:{house_number}",
-                        "range_id": str(range_id),
-                        "house_number": house_number,
-                        "parity": "even" if house_number % 2 == 0 else "odd",
-                        "side": side,
-                        "pre_directional": pre,
-                        "street_name": street_name,
-                        "street_suffix": suffix,
-                        "post_directional": post,
-                        "street_norm": normalize_text(
-                            " ".join(p for p in (pre, street_name, suffix, post) if p)
-                        ),
-                        "street_block": street_block_key(street_name),
-                        "city": city,
-                        "city_norm": city,
-                        "state": state_value,
-                        "state_norm": state_value,
-                        "zip5": zip5,
-                        "latitude": float(latitude),
-                        "longitude": float(longitude),
-                        "geometry_wkt": Point(longitude, latitude).wkt,
-                        "interpolation_crs": str(projected_crs),
-                        "source": source,
-                        "source_type": source_type,
-                        "source_priority": int(source_priority),
-                        "source_record_id": str(range_id),
-                    }
-                )
-    return pd.DataFrame(output_rows)
+            if start == end:
+                fractions = np.zeros(len(numbers), dtype=float)
+            else:
+                fractions = (numbers - start) / (end - start)
+                fractions = np.clip(fractions, 0.0, 1.0)
+            distances = offset + fractions * usable_length
+            points_projected = _offset_points(line, distances, side, side_offset)
+            point_x = shapely.get_x(points_projected)
+            point_y = shapely.get_y(points_projected)
+            longitude, latitude = transformer.transform(point_x, point_y)
+            points_wgs84 = shapely.points(longitude, latitude)
+            n_rows = len(numbers)
+            street_norm = normalize_text(" ".join(p for p in (pre, street_name, suffix, post) if p))
+            common = {
+                "range_id": str(range_id),
+                "parity": ["even" if number % 2 == 0 else "odd" for number in numbers],
+                "side": side,
+                "pre_directional": pre,
+                "street_name": street_name,
+                "street_suffix": suffix,
+                "post_directional": post,
+                "street_norm": street_norm,
+                "street_block": street_block_key(street_name),
+                "city": city,
+                "city_norm": city,
+                "state": state_value,
+                "state_norm": state_value,
+                "zip5": zip5,
+                "interpolation_crs": str(projected_crs),
+                "source": source,
+                "source_type": source_type,
+                "source_priority": int(source_priority),
+                "source_record_id": str(range_id),
+            }
+            output_columns["address_id"].extend(
+                f"{source}:{range_id}:{side}:{house_number}" for house_number in numbers
+            )
+            output_columns["house_number"].extend(numbers.tolist())
+            for column, value in common.items():
+                if isinstance(value, list):
+                    output_columns[column].extend(value)
+                else:
+                    output_columns[column].extend([value] * n_rows)
+            output_columns["latitude"].extend(np.asarray(latitude, dtype=float).tolist())
+            output_columns["longitude"].extend(np.asarray(longitude, dtype=float).tolist())
+            output_columns["geometry_wkt"].extend(
+                shapely.to_wkt(points_wgs84, rounding_precision=-1).tolist()
+            )
+    return pd.DataFrame(output_columns, columns=ADDRESS_COLUMNS)
 
 
 def ranges_from_file(path: str, *, layer: str | None = None) -> gpd.GeoDataFrame:
