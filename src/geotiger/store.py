@@ -16,6 +16,8 @@ from .normalize import (
     normalize_text,
     normalize_zip,
     parse_address,
+    intersection_component_keys,
+    route_component_keys,
     street_name_key,
     street_name_phonetic_key,
 )
@@ -805,7 +807,7 @@ class GeoTIGERStore:
         self,
         inputs: pd.DataFrame,
         *,
-        house_number_tolerance: int = 25,
+        house_number_tolerance: int = 100,
         street_blocking: bool = True,
         strict_locality: bool = True,
         exact_street_first: bool = True,
@@ -1076,13 +1078,23 @@ class GeoTIGERStore:
             "intersection_phonetic_key",
         ):
             frame[column] = frame[column].fillna("").astype(str)
+        frame["street_name_key_alts"] = [
+            route_component_keys(value) for value in frame["street_name_key"]
+        ]
+        frame["intersection_match_key_alts"] = [
+            intersection_component_keys(value)
+            for value in frame["intersection_match_key"]
+        ]
         view = f"_geotiger_inputs_{uuid.uuid4().hex}"
         self.connection.register(view, frame)
         conditions = []
         if _intersection_only:
             conditions.append("a.is_intersection IS TRUE")
             if intersection_variant:
-                conditions.append("a.intersection_match_key = i.intersection_match_key")
+                conditions.append(
+                    "(a.intersection_match_key = i.intersection_match_key OR "
+                    "list_contains(i.intersection_match_key_alts, a.intersection_match_key))"
+                )
             elif intersection_phonetic:
                 conditions.append(
                     "a.intersection_phonetic_key = i.intersection_phonetic_key"
@@ -1098,7 +1110,10 @@ class GeoTIGERStore:
                 conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
         if not _intersection_only:
             if name_key_street:
-                conditions.append("a.street_name_key = i.street_name_key")
+                conditions.append(
+                    "(a.street_name_key = i.street_name_key OR "
+                    "list_contains(i.street_name_key_alts, a.street_name_key))"
+                )
             elif phonetic_street:
                 conditions.append("a.street_name_phonetic = i.street_name_phonetic")
             elif exact_street:
@@ -1106,8 +1121,8 @@ class GeoTIGERStore:
                     # Treat spacing-only variants such as ``SNOWCREST TRL``
                     # and ``SNOW CREST TRL`` as the same normalized street.
                     # This branch only receives rows unresolved by the fast
-                    # exact-street pass.
-                    conditions.append("a.street_block = i.street_block")
+                    # exact-street pass. Do not also require street_block:
+                    # suffix splits change the name token used for that key.
                     conditions.append(
                         "replace(a.street_norm, ' ', '') = replace(i.street_norm, ' ', '')"
                     )
@@ -1124,11 +1139,19 @@ class GeoTIGERStore:
                     conditions.append(f"a.{column} = i.{column}")
                 else:
                     conditions.append(f"(i.{column} = '' OR a.{column} = i.{column})")
+        qualify = ""
         if not _intersection_only:
             conditions.append(
                 f"(i.house_number IS NULL OR "
                 f"abs(a.house_number - i.house_number) <= {int(house_number_tolerance)})"
             )
+            qualify = """
+            QUALIFY i.house_number IS NOT NULL
+                 OR ROW_NUMBER() OVER (
+                        PARTITION BY i.input_id
+                        ORDER BY a.house_number, a.address_id
+                    ) = 1
+            """
         join_where = " AND ".join(conditions) or "TRUE"
         reference_table = "address_intersections" if _intersection_only else "addresses"
         if intersection_phonetic:
@@ -1186,6 +1209,7 @@ class GeoTIGERStore:
             FROM {view} i
             INNER JOIN {reference_table} a
               ON {join_where}
+            {qualify}
         """
         try:
             return self.connection.execute(query).df()

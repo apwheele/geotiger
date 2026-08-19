@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 from rapidfuzz.distance import Levenshtein
 
-from .normalize import normalize_text, parse_record
+from .normalize import normalize_text, parse_record, route_component_keys
 from .store import GeoTIGERStore
 
 DEFAULT_WEIGHTS = {
@@ -43,7 +43,11 @@ class GeocoderConfig:
     auto_match_threshold: float = 90.0
     review_threshold: float = 75.0
     min_margin: float = 0.0
-    house_number_tolerance: int = 25
+    # Hard retrieval cutoff, not a score threshold. Candidates farther than
+    # this from the input house number are never scored. One 100-block is the
+    # usual US range-end / crime-block miss; a tighter window drops the named
+    # street and can fall through to a weaker phonetic neighbor.
+    house_number_tolerance: int = 100
     exact_house_number_first: bool = True
     street_blocking: bool = True
     exact_street_first: bool = True
@@ -234,7 +238,7 @@ def _number_similarity(left: Any, right: Any) -> float | None:
         return None
     left, right = int(left), int(right)
     difference = abs(left - right)
-    scale = max(25, left)
+    scale = max(100, left)
     return max(0.0, 100.0 * (1.0 - difference / scale))
 
 
@@ -290,6 +294,7 @@ def _score_candidates(
                 "state_norm",
                 "zip5",
                 "is_intersection",
+                "intersection_key",
                 "intersection_match_key",
             ]
         ].rename(
@@ -304,18 +309,19 @@ def _score_candidates(
                 "state_norm": "input_state_norm",
                 "zip5": "input_zip5",
                 "is_intersection": "input_is_intersection",
+                "intersection_key": "input_intersection_key",
                 "intersection_match_key": "input_intersection_match_key",
             }
         ),
         on="input_id",
     )
+    house_difference = (
+        joined["candidate_house_number"] - joined["input_house_number"]
+    ).abs()
     joined["score_house_number"] = (
         100.0
         - 100.0
-        * (
-            (joined["candidate_house_number"] - joined["input_house_number"]).abs()
-            / joined["input_house_number"].clip(lower=25)
-        )
+        * (house_difference / joined["input_house_number"].clip(lower=100))
     ).clip(lower=0.0)
     audit_street_components = (
         ("street_name", "input_street_name_key", "candidate_street_name_key"),
@@ -327,6 +333,42 @@ def _score_candidates(
         joined[f"score_{name}"] = _component_similarity_batch(
             joined[left_column], joined[right_column]
         )
+    input_keys = joined["input_street_name_key"].fillna("").astype(str)
+    candidate_keys = joined["candidate_street_name_key"].fillna("").astype(str)
+    concurrent = input_keys.ne("") & candidate_keys.ne("") & input_keys.ne(candidate_keys)
+    if concurrent.any():
+        same_route = pd.Series(
+            [
+                bool(set(route_component_keys(left)) & set(route_component_keys(right)))
+                for left, right in zip(
+                    input_keys.loc[concurrent],
+                    candidate_keys.loc[concurrent],
+                    strict=True,
+                )
+            ],
+            index=joined.index[concurrent],
+        )
+        joined.loc[same_route.index[same_route], "score_street_name"] = 100.0
+    input_street = joined["input_street_norm"].fillna("").astype(str)
+    candidate_street = joined["candidate_street_norm"].fillna("").astype(str)
+    exact_street = input_street.ne("") & (
+        input_street.eq(candidate_street)
+        | input_street.str.replace(" ", "", regex=False).eq(
+            candidate_street.str.replace(" ", "", regex=False)
+        )
+    )
+    # Exact or spacing-only street strings are a perfect street identity even
+    # when a later suffix split disagrees with an older prepared reference.
+    if exact_street.any():
+        joined.loc[exact_street, "score_street_name"] = 100.0
+    # A 100-block miss on an otherwise identical street name is typical of
+    # TIGER range ends and 100-block crime labels. Keep those above the
+    # auto-match line without boosting far-away nearest-house fallbacks.
+    close_on_same_name = joined["score_street_name"].eq(100.0) & house_difference.le(100)
+    if close_on_same_name.any():
+        joined.loc[close_on_same_name, "score_house_number"] = joined.loc[
+            close_on_same_name, "score_house_number"
+        ].clip(lower=85.0)
     input_directional = joined["input_pre_directional"].where(
         joined["input_pre_directional"].fillna("").ne(""),
         joined["input_post_directional"],
@@ -355,12 +397,21 @@ def _score_candidates(
     joined["score_street"] = street_numerator / street_denominator.where(
         street_denominator.ne(0), 1.0
     )
+    if exact_street.any():
+        joined.loc[exact_street, "score_street"] = 100.0
     intersection_mask = joined["input_is_intersection"].fillna(False).astype(bool)
     if intersection_mask.any():
         intersection_scores = _text_similarity_batch(
             joined.loc[intersection_mask, "input_intersection_match_key"],
             joined.loc[intersection_mask, "candidate_intersection_match_key"],
         )
+        exact_intersection = (
+            joined.loc[intersection_mask, "input_intersection_key"].fillna("").ne("")
+            & joined.loc[intersection_mask, "input_intersection_key"].eq(
+                joined.loc[intersection_mask, "candidate_intersection_key"]
+            )
+        )
+        intersection_scores = intersection_scores.where(~exact_intersection, 100.0)
         joined.loc[intersection_mask, "score_street"] = intersection_scores
         joined.loc[intersection_mask, "score_street_name"] = intersection_scores
     for name, left_column, right_column in (
@@ -406,6 +457,7 @@ def _score_candidates(
             "input_state_norm",
             "input_zip5",
             "input_is_intersection",
+            "input_intersection_key",
             "input_intersection_match_key",
         ]
     )

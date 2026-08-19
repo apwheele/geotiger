@@ -1,8 +1,9 @@
 """Address parsing and deterministic normalization.
 
-The parser is deliberately kept separate from matching. Parsing is the only
-step that may use the probabilistic CRF model in :mod:`usaddress`; all later
-steps operate on canonical strings and numeric fields that can be audited.
+Component tagging uses :mod:`usaddress`. This module then canonicalizes those
+tagged fields (directionals, USPS suffixes, state, ZIP, route identity) for
+matching. Intersection strings are split first because usaddress treats the
+whole string as one address.
 """
 
 from __future__ import annotations
@@ -30,7 +31,11 @@ _US_ROUTE_RE = re.compile(
     r"^(?:US|U S)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?\s*"
     r"(\d+(?:\s+\d+)*)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$"
 )
-_INTERSTATE_RE = re.compile(r"^(?:I|INTERSTATE)\s*(\d+[A-Z]?)$")
+_INTERSTATE_RE = re.compile(r"^(?:I|INTERSTATE)\s*(\d+[A-Z]?(?:\s+\d+[A-Z]?)*)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$")
+_ROUTE_NUMBER_RE = re.compile(r"\d+[A-Z]?")
+_ROUTE_KEY_PREFIX_RE = re.compile(r"^(US|I|[A-Z]{2}) (.+)$")
+# Prefixes usaddress sometimes labels as PreDirectional on numbered routes.
+_ROUTE_PREFIX_TOKENS = {"US", "U S", "I", "INTERSTATE", "STATE"}
 
 _DIRECTIONALS = {
     "NORTH": "N",
@@ -57,43 +62,68 @@ _DIRECTIONALS = {
 
 _SUFFIXES = {
     "ALLEY": "ALY",
+    "ALY": "ALY",
     "AVENUE": "AVE",
     "AV": "AVE",
-    "BOULEVARD": "BLVD",
-    "CIRCLE": "CIR",
-    "COURT": "CT",
-    "DRIVE": "DR",
-    "EXPRESSWAY": "EXPY",
-    "HIGHWAY": "HWY",
-    "JUNCTION": "JCT",
-    "LANE": "LN",
-    "MOUNTAIN": "MTN",
-    "PARKWAY": "PKWY",
-    "PLACE": "PL",
-    "PLAZA": "PLZ",
-    "ROAD": "RD",
-    "ROUTE": "RTE",
-    "SQUARE": "SQ",
-    "STREET": "ST",
-    "TERRACE": "TER",
-    "TRAIL": "TRL",
-    "TURNPIKE": "TPKE",
-    "WAY": "WAY",
-    "ST": "ST",
-    "RD": "RD",
     "AVE": "AVE",
+    "BOULEVARD": "BLVD",
     "BLVD": "BLVD",
+    "CIRCLE": "CIR",
     "CIR": "CIR",
+    "COURT": "CT",
+    "CT": "CT",
+    "CRESCENT": "CRES",
+    "CRES": "CRES",
+    "CREEK": "CRK",
+    "CRK": "CRK",
+    "CROSSING": "XING",
+    "XING": "XING",
+    "DRIVE": "DR",
     "DR": "DR",
-    "LN": "LN",
+    "EXPRESSWAY": "EXPY",
+    "EXPY": "EXPY",
+    "FREEWAY": "FWY",
+    "FWY": "FWY",
+    "HEIGHTS": "HTS",
+    "HTS": "HTS",
+    "HIGHWAY": "HWY",
     "HWY": "HWY",
+    "JUNCTION": "JCT",
+    "JCT": "JCT",
+    "LANE": "LN",
+    "LN": "LN",
+    "LOOP": "LOOP",
+    "MOUNTAIN": "MTN",
+    "MTN": "MTN",
+    "PARKWAY": "PKWY",
     "PKWY": "PKWY",
+    "PASS": "PASS",
+    "PATH": "PATH",
+    "PIKE": "PIKE",
+    "PLACE": "PL",
     "PL": "PL",
+    "PLAZA": "PLZ",
+    "PLZ": "PLZ",
+    "ROAD": "RD",
+    "RD": "RD",
+    "ROUTE": "RTE",
     "RTE": "RTE",
+    "ROW": "ROW",
+    "RUN": "RUN",
+    "SQUARE": "SQ",
     "SQ": "SQ",
+    "STATION": "STA",
+    "STA": "STA",
+    "STREET": "ST",
+    "ST": "ST",
+    "TERRACE": "TER",
     "TER": "TER",
+    "TRAIL": "TRL",
     "TRL": "TRL",
+    "TURNPIKE": "TPKE",
     "TPKE": "TPKE",
+    "WALK": "WALK",
+    "WAY": "WAY",
 }
 
 _STATE_ALIASES = {
@@ -120,6 +150,10 @@ _STATE_ALIASES = {
     "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA", "54": "WV",
     "55": "WI", "56": "WY", "11": "DC",
 }
+
+_ROUTE_PREFIX_TOKENS.update(
+    {code for code in _STATE_ALIASES.values() if len(code) == 2 and code.isalpha()}
+)
 
 _ORDINAL_WORDS = {
     "FIRST": "1ST",
@@ -224,6 +258,13 @@ def normalize_street_name(value: Any) -> str:
     return " ".join(tokens)
 
 
+def _without_trailing_directional(text: str) -> str:
+    tokens = text.split()
+    if len(tokens) >= 2 and tokens[-1] in _DIRECTIONALS:
+        return " ".join(tokens[:-1])
+    return text
+
+
 def street_name_key(
     street_name: Any,
     street_suffix: Any = "",
@@ -233,34 +274,65 @@ def street_name_key(
 
     Numbered state, US, and Interstate routes receive a common key so common
     source forms such as ``NC 55 HWY`` and ``STATE HWY 55`` can enter scoring.
-    A candidate is not accepted on this key alone: house number, locality,
+    Trailing directionals on those routes (``US 70 HWY E``) are ignored in the
+    key. A candidate is not accepted on this key alone: house number, locality,
     component scores, thresholds, and score margins still apply.
     """
 
     name = normalize_text(street_name)
     suffix = normalize_suffix(street_suffix)
     route_text = normalize_text(" ".join(value for value in (name, suffix) if value))
-    for pattern, prefix in (
-        (_INTERSTATE_RE, "I"),
-        (_US_ROUTE_RE, "US"),
-    ):
-        match = pattern.match(route_text)
-        if match:
-            route_number = _SPACE_RE.sub(" ", match.group(1)).strip()
-            return f"{prefix} {route_number}"
-    state_route = _STATE_ROUTE_RE.match(route_text)
-    if state_route:
-        route_label = state_route.group(1)
-        route_number = state_route.group(2)
-        state_code = normalize_state(state)
-        if route_label.startswith("STATE"):
-            route_label = state_code or "STATE"
-        else:
-            route_label = route_label.replace(" ", "")
-            if state_code and route_label != state_code:
-                return normalize_street_name(name)
-        return f"{route_label} {route_number}"
+    for candidate in (route_text, _without_trailing_directional(route_text)):
+        if not candidate:
+            continue
+        for pattern, prefix in (
+            (_INTERSTATE_RE, "I"),
+            (_US_ROUTE_RE, "US"),
+        ):
+            match = pattern.match(candidate)
+            if match:
+                route_number = _SPACE_RE.sub(" ", match.group(1)).strip()
+                return f"{prefix} {route_number}"
+        state_route = _STATE_ROUTE_RE.match(candidate)
+        if state_route:
+            route_label = state_route.group(1)
+            route_number = state_route.group(2)
+            state_code = normalize_state(state)
+            if route_label.startswith("STATE"):
+                route_label = state_code or "STATE"
+            else:
+                route_label = route_label.replace(" ", "")
+                if state_code and route_label != state_code:
+                    continue
+            return f"{route_label} {route_number}"
     return normalize_street_name(name)
+
+
+def route_component_keys(key: str) -> list[str]:
+    """Return blocking keys for concurrent numbered routes such as ``US 15 501``.
+
+    Single-number routes and ordinary street names return only themselves, so
+    ``Main`` and ``US 70`` do not broaden. Concurrent US/state/Interstate keys
+    also include each individual number so ``US 15 501`` can retrieve TIGER
+    ``US 15`` or ``US 501``.
+    """
+
+    key = normalize_text(key)
+    if not key:
+        return []
+    match = _ROUTE_KEY_PREFIX_RE.match(key)
+    if not match:
+        return [key]
+    prefix, rest = match.group(1), match.group(2)
+    numbers = _ROUTE_NUMBER_RE.findall(rest)
+    if len(numbers) < 2:
+        return [key]
+    keys = [key]
+    for number in numbers:
+        component = f"{prefix} {number}"
+        if component not in keys:
+            keys.append(component)
+    return keys
 
 
 def _soundex_token(token: str) -> str:
@@ -319,6 +391,24 @@ def intersection_key(left: Any, right: Any) -> str:
 
     streets = sorted(value for value in (normalize_text(left), normalize_text(right)) if value)
     return " || ".join(streets)
+
+
+def intersection_component_keys(match_key: str) -> list[str]:
+    """Expand a canonical intersection key with concurrent-route variants."""
+
+    match_key = str(match_key or "").strip()
+    if not match_key:
+        return []
+    if " || " not in match_key:
+        return route_component_keys(match_key)
+    left, right = match_key.split(" || ", 1)
+    keys: list[str] = []
+    for first in route_component_keys(left) or [left]:
+        for second in route_component_keys(right) or [right]:
+            key = intersection_key(first, second)
+            if key and key not in keys:
+                keys.append(key)
+    return keys
 
 
 def extract_house_number(value: Any) -> int | None:
@@ -438,49 +528,19 @@ def _first(parsed: Mapping[str, str], *keys: str) -> str:
     return ""
 
 
-def _simple_parse(
-    raw: str,
-    *,
-    city: Any,
-    state: Any,
-    zip_code: Any,
-) -> ParsedAddress | None:
-    """Fast path for the common ``123 N Main St`` form.
+def _tag_address(raw: str) -> dict[str, str]:
+    """Return usaddress component labels for one address string."""
 
-    Full usaddress parsing remains the fallback for commas, units, rural
-    routes, and other complex forms. The fast path matters for large batches
-    of already standardized crime/RMS exports.
-    """
-
-    if not raw or "," in raw:
-        return None
-    normalized = normalize_text(raw)
-    tokens = normalized.split()
-    if len(tokens) < 2:
-        return None
-    number = int(tokens.pop(0)) if tokens[0].isdigit() else None
-    pre = ""
-    post = ""
-    if tokens and tokens[0] in _DIRECTIONALS:
-        pre = normalize_directional(tokens.pop(0))
-    if tokens and tokens[-1] in _DIRECTIONALS:
-        post = normalize_directional(tokens.pop())
-    suffix = ""
-    if tokens and tokens[-1] in _SUFFIXES:
-        suffix = normalize_suffix(tokens.pop())
-    if not tokens:
-        return None
-    return ParsedAddress(
-        raw_address=raw,
-        house_number=number,
-        pre_directional=pre,
-        street_name=normalize_text(" ".join(tokens)),
-        street_suffix=suffix,
-        post_directional=post,
-        city=normalize_text(city),
-        state=normalize_state(state),
-        zip5=normalize_zip(zip_code),
-    )
+    try:
+        parsed, _ = usaddress.tag(raw)
+        return {str(key): str(value) for key, value in parsed.items()}
+    except usaddress.RepeatedLabelError:
+        # Duplicate labels are uncommon but should not make a batch fail. The
+        # token parser still provides useful first-occurrence fields.
+        parsed: dict[str, str] = {}
+        for token, label in usaddress.parse(raw):
+            parsed.setdefault(label, token)
+        return parsed
 
 
 def _parse_single_address(
@@ -490,29 +550,65 @@ def _parse_single_address(
     state: Any = "",
     zip_code: Any = "",
 ) -> ParsedAddress:
-    """Parse one non-intersection US address."""
+    """Parse one non-intersection US address with usaddress, then canonicalize."""
 
     raw = "" if address is None else str(address)
     if raw.strip().upper() in {"NAN", "<NA>", "NONE"}:
         raw = ""
-    simple = _simple_parse(raw, city=city, state=state, zip_code=zip_code)
-    if simple is not None:
-        return simple
-    parsed: dict[str, str]
-    try:
-        parsed, _ = usaddress.tag(raw)
-    except usaddress.RepeatedLabelError:
-        # Duplicate labels are uncommon but should not make a batch fail. The
-        # token parser still provides useful first-occurrence fields.
-        parsed = {}
-        for token, label in usaddress.parse(raw):
-            parsed.setdefault(label, token)
+    dummy_house = False
+    tagged = raw
+    # usaddress is much more reliable with a house number present. Street
+    # fragments such as ``Mount Moriah Rd`` otherwise mis-tag ``Mount``.
+    if tagged and _NUMBER_RE.match(tagged) is None:
+        tagged = f"1 {tagged}"
+        dummy_house = True
+    parsed = _tag_address(tagged) if raw else {}
 
     house_raw = _first(parsed, "AddressNumber")
-    pre = normalize_directional(_first(parsed, "StreetNamePreDirectional"))
-    street = normalize_text(_first(parsed, "StreetName"))
+    pre_raw = _first(parsed, "StreetNamePreDirectional")
+    post_raw = _first(parsed, "StreetNamePostDirectional")
+    pre = normalize_directional(pre_raw)
+    # PreType holds route prefixes such as ``NC`` or ``State Hwy``; keep it
+    # in the auditable street name so later route keys can unify forms.
+    street = normalize_text(
+        " ".join(
+            part
+            for part in (_first(parsed, "StreetNamePreType"), _first(parsed, "StreetName"))
+            if part
+        )
+    )
     suffix = normalize_suffix(_first(parsed, "StreetNamePostType"))
-    post = normalize_directional(_first(parsed, "StreetNamePostDirectional"))
+    post = normalize_directional(post_raw)
+    # usaddress sometimes labels a route prefix as a pre-directional
+    # (``US 15-501`` -> PreDirectional=US, StreetName=15-501).
+    prefix_token = normalize_text(pre_raw)
+    if (
+        prefix_token in _ROUTE_PREFIX_TOKENS
+        and street
+        and street.split()[0][:1].isdigit()
+    ):
+        street = normalize_text(f"{prefix_token} {street}")
+        pre = ""
+        pre_raw = ""
+    # Trailing N/S/E/W on a numbered route belongs in post-directional, not
+    # the street-name key (``US 70 HWY E``). Ordinary names such as East St
+    # are left alone because they are not numbered routes.
+    tokens = street.split()
+    if len(tokens) >= 2 and tokens[-1] in _DIRECTIONALS:
+        remainder = " ".join(tokens[:-1])
+        if re.match(r"^(US|I|[A-Z]{2}) \d", street_name_key(remainder, suffix, state)):
+            if not post:
+                post = normalize_directional(tokens[-1])
+            street = remainder
+    # usaddress sometimes labels a directional street name as a postfix
+    # (``100 SOUTH ST``) even though ``1 SOUTH ST`` tags it as StreetName.
+    if not street:
+        if post_raw:
+            street = normalize_text(post_raw)
+            post = ""
+        elif pre_raw:
+            street = normalize_text(pre_raw)
+            pre = ""
     unit = normalize_text(
         _first(
             parsed,
@@ -527,7 +623,7 @@ def _parse_single_address(
     parsed_zip = _first(parsed, "ZipCode")
     return ParsedAddress(
         raw_address=raw,
-        house_number=extract_house_number(house_raw),
+        house_number=None if dummy_house else extract_house_number(house_raw),
         pre_directional=pre,
         street_name=street,
         street_suffix=suffix,

@@ -3,6 +3,7 @@ from geotiger.normalize import (
     normalize_street_name,
     normalize_zip,
     parse_address,
+    route_component_keys,
 )
 
 
@@ -46,6 +47,37 @@ def test_street_name_normalization_handles_ordinals_and_lexical_abbreviations():
     assert normalize_street_name("Saint Paul") == "ST PAUL"
 
 
+def test_directional_words_are_street_names_when_no_other_name_remains():
+    south = parse_address("850 SOUTH ST", city="Durham", state="NC")
+    north = parse_address("100 NORTH STREET")
+    east = parse_address("EAST ST / MAIN ST")
+
+    assert south.house_number == 850
+    assert south.street_name == "SOUTH"
+    assert south.street_suffix == "ST"
+    assert south.pre_directional == ""
+    assert south.post_directional == ""
+    assert south.street_norm == "SOUTH ST"
+    assert north.street_norm == "NORTH ST"
+    assert east.is_intersection
+    assert east.street_norm == "EAST ST || MAIN ST"
+
+
+def test_common_usps_suffix_abbreviations_are_split_from_the_name():
+    court = parse_address("100 Freedom Ct")
+    crescent = parse_address("250 Foxridge Crescent")
+    creek = parse_address("250 Tamworth Crk")
+
+    assert court.street_name == "FREEDOM"
+    assert court.street_suffix == "CT"
+    assert court.street_norm == "FREEDOM CT"
+    assert crescent.street_name == "FOXRIDGE"
+    assert crescent.street_suffix == "CRES"
+    assert crescent.street_norm == "FOXRIDGE CRES"
+    assert creek.street_name == "TAMWORTH"
+    assert creek.street_suffix == "CRK"
+
+
 def test_route_and_phonetic_keys_preserve_auditable_parsed_components():
     highway = parse_address("4750 NC 55 Highway", state="NC")
     tiger = parse_address("4750 State Hwy 55", state="NC")
@@ -62,3 +94,20 @@ def test_route_and_phonetic_keys_preserve_auditable_parsed_components():
     )
     assert ivey.street_name != ivy.street_name
     assert ivey.street_name_phonetic == ivy.street_name_phonetic
+
+
+def test_numbered_route_keys_ignore_trailing_directionals():
+    east = parse_address("2450 US 70 HWY E", state="NC")
+    tiger = parse_address("2450 US Hwy 70", state="NC")
+    hyphen = parse_address("100 US 15-501 N", state="NC")
+
+    assert east.post_directional == "E"
+    assert east.street_name_key == tiger.street_name_key == "US 70"
+    assert hyphen.street_name_key == "US 15 501"
+    assert hyphen.post_directional == "N"
+    assert route_component_keys("US 15 501") == ["US 15 501", "US 15", "US 501"]
+    assert route_component_keys("US 70") == ["US 70"]
+    assert route_component_keys("MAIN") == ["MAIN"]
+    # Ordinary directional street names are not treated as routes.
+    assert parse_address("100 East St").street_name_key == "EAST"
+    assert parse_address("100 E Main St").street_norm == "E MAIN ST"

@@ -87,11 +87,16 @@ same DuckDB file to limit peak memory use.
 - With `strict_locality=True` (the default), state/city/ZIP are locality
   blocks when supplied; default scoring therefore emphasizes street identity
   (`0.62`) and house-number proximity (`0.30`).
-- Street names, suffixes, and directionals are parsed and scored separately.
-  Common ordinals and abbreviations (`Ninth`/`9th`, `Mount`/`Mt`) and numbered
-  route forms are canonicalized; a phonetic candidate block handles small
-  spelling variants such as `Ivey`/`Ivy`. Suffixes such as `Rd`/`Dr` remain
-  visible as low-weight evidence instead of preventing candidate retrieval.
+- Street names, suffixes, and directionals are tagged with `usaddress`, then
+  canonicalized and scored separately. Common ordinals and abbreviations
+  (`Ninth`/`9th`, `Mount`/`Mt`), directional street names (`South St`), and
+  numbered route forms are unified after tagging (including trailing
+  directionals on `US 70 HWY E` and concurrent numbers such as `US 15-501`);
+  a phonetic candidate block
+  handles small spelling variants such as `Ivey`/`Ivy`. Suffixes such as
+  `Rd`/`Dr` remain visible as low-weight evidence instead of preventing
+  candidate retrieval. The default house-number window is one 100-block so
+  range-end misses still retrieve the named street.
 - `street_variant_fallback=False` disables canonical-name and phonetic
   fallback. This is separate from `street_fallback`, which controls the
   broader legacy street-signature pass.

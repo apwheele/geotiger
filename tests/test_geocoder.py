@@ -186,6 +186,66 @@ def test_component_aware_street_variants_reach_scoring_without_broad_fallback():
     ]
 
 
+def test_concurrent_us_routes_retrieve_single_number_tiger_forms():
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges.loc[:, "FULLNAME"] = "US Hwy 15"
+    store = make_store()
+    store.ingest_candidates(
+        prepare_ranges(
+            ranges,
+            config=InterpolationConfig(
+                end_offset_m=0,
+                side_offset_m=0,
+                include_intersections=False,
+            ),
+            source="us15",
+        ),
+        replace=True,
+    )
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "100 US 15 501 HWY N", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_street_norm"] == "US HWY 15"
+    assert result.matches.loc[0, "match_method"] == "street_canonical"
+
+
+def test_us_route_with_trailing_directional_matches_tiger_form():
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges.loc[:, "FULLNAME"] = "US Hwy 70"
+    store = make_store()
+    store.ingest_candidates(
+        prepare_ranges(
+            ranges,
+            config=InterpolationConfig(
+                end_offset_m=0,
+                side_offset_m=0,
+                include_intersections=False,
+            ),
+            source="us70",
+        ),
+        replace=True,
+    )
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "100 US 70 HWY E", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_street_norm"] == "US HWY 70"
+    assert result.matches.loc[0, "street_name_key"] == "US 70"
+
+
 def test_intersection_variants_use_canonical_component_keys():
     ranges = make_range_frame().copy()
     ranges.loc[0, "FULLNAME"] = "1st Avenue"
@@ -243,6 +303,124 @@ def test_directional_identity_outweighs_street_suffix():
 
     assert result.matches.loc[0, "match_status"] == "matched"
     assert result.matches.loc[0, "matched_street_norm"] == "N ROXBORO RD"
+
+
+def test_out_of_range_house_on_exact_street_is_preferred_over_phonetic():
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges = pd.concat([ranges, ranges], ignore_index=True)
+    ranges = ranges.set_geometry("geometry").set_crs("EPSG:4326")
+    ranges.loc[0, "TLID"] = "sima"
+    ranges.loc[0, "FULLNAME"] = "Sima Avenue"
+    ranges.loc[0, ["LFROMADD", "RFROMADD"]] = 1300
+    ranges.loc[0, ["LTOADD", "RTOADD"]] = 1398
+    ranges.loc[1, "TLID"] = "shawnee"
+    ranges.loc[1, "FULLNAME"] = "Shawnee Street"
+    ranges.loc[1, ["LFROMADD", "RFROMADD"]] = 1400
+    ranges.loc[1, ["LTOADD", "RTOADD"]] = 1500
+    store = make_store()
+    store.ingest_candidates(
+        prepare_ranges(
+            ranges,
+            config=InterpolationConfig(
+                end_offset_m=0,
+                side_offset_m=0,
+                include_intersections=False,
+            ),
+        ),
+        replace=True,
+    )
+
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "1450 Sima Ave", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_street_norm"] == "SIMA AVE"
+    assert result.matches.loc[0, "match_method"] == "street_exact"
+
+
+def test_missing_house_number_matches_the_named_street():
+    store = make_store()
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "Main St", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_street_norm"] == "MAIN ST"
+    assert pd.isna(result.matches.loc[0, "house_number"])
+
+
+def test_exact_street_string_scores_perfect_when_suffix_split_differs():
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges.loc[:, "FULLNAME"] = "William Penn Plaza"
+    store = make_store()
+    prepared = prepare_ranges(
+        ranges,
+        config=InterpolationConfig(
+            end_offset_m=0,
+            side_offset_m=0,
+            include_intersections=False,
+        ),
+    )
+    # Simulate an older reference that kept a now-recognized suffix in the name.
+    prepared = prepared.copy()
+    prepared["street_name"] = "WILLIAM PENN PLZ"
+    prepared["street_suffix"] = ""
+    prepared["street_name_key"] = "WILLIAM PENN PLZ"
+    store.ingest_candidates(prepared, replace=True)
+
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "100 William Penn Plaza", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "score_street"] == 100
+    assert result.matches.loc[0, "matched_street_norm"] == "WILLIAM PENN PLZ"
+
+
+def test_south_street_matches_directional_street_name():
+    ranges = make_range_frame().iloc[[0]].copy()
+    ranges.loc[:, "FULLNAME"] = "South St"
+    ranges[["LFROMADD", "RFROMADD"]] = 800
+    ranges[["LTOADD", "RTOADD"]] = 900
+    store = make_store()
+    store.ingest_candidates(
+        prepare_ranges(
+            ranges,
+            config=InterpolationConfig(
+                end_offset_m=0,
+                side_offset_m=0,
+                include_intersections=False,
+            ),
+        ),
+        replace=True,
+    )
+    result = Geocoder(
+        store,
+        config=GeocoderConfig(strict_locality=False, street_fallback=False),
+    ).geocode(
+        pd.DataFrame([{"address": "850 SOUTH ST", "state": "NC"}]),
+        city_column=None,
+        zip_column=None,
+    )
+
+    assert result.matches.loc[0, "match_status"] == "matched"
+    assert result.matches.loc[0, "matched_street_norm"] == "SOUTH ST"
 
 
 def test_locality_blocking_rejects_wrong_state_and_zip():

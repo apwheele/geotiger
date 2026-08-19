@@ -11,6 +11,7 @@ from .normalize import (
     normalize_text,
     parse_address,
     street_block_key,
+    route_component_keys,
     street_name_key,
     street_name_phonetic_key,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "save_ranges",
     "state_plane_crs",
     "street_block_key",
+    "route_component_keys",
     "street_name_key",
     "street_name_phonetic_key",
 ]
