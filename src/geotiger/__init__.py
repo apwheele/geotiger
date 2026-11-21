@@ -10,8 +10,8 @@ from .normalize import (
     normalize_street_name,
     normalize_text,
     parse_address,
-    street_block_key,
     route_component_keys,
+    street_block_key,
     street_name_key,
     street_name_phonetic_key,
 )

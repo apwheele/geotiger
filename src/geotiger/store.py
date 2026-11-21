@@ -11,12 +11,12 @@ import duckdb
 import pandas as pd
 
 from .normalize import (
+    intersection_component_keys,
     intersection_key,
     normalize_state,
     normalize_text,
     normalize_zip,
     parse_address,
-    intersection_component_keys,
     route_component_keys,
     street_name_key,
     street_name_phonetic_key,

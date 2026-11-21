@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling==1.29.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,9 +8,19 @@ version = "0.1.0"
 description = "Local-first US address geocoding from TIGER/Line address ranges"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "GeoTIGER contributors" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Andrew Wheeler", email = "andrew.wheeler@crimede-coder.com" }]
 keywords = ["geocoding", "tiger", "census", "duckdb", "gis"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: GIS",
+]
 dependencies = [
   "duckdb>=1.0",
   "folium>=0.16",
@@ -37,11 +47,25 @@ demo = [
   "nbformat>=5.9",
 ]
 
+[project.urls]
+Homepage = "https://github.com/apwheele/geotiger"
+Repository = "https://github.com/apwheele/geotiger"
+Issues = "https://github.com/apwheele/geotiger/issues"
+Documentation = "https://github.com/apwheele/geotiger#readme"
+
 [project.scripts]
 geotiger = "geotiger.cli:app"
 
+# Hatchling 1.29.0 emits Core Metadata 2.4, including the SPDX license
+# expression. Verified with `twine check --strict` on Twine 7.0.0. The pin
+# keeps a newer Hatchling from changing the metadata version on its own.
+[tool.hatch.build.targets.sdist]
+only-include = ["src/geotiger", "tests"]
+core-metadata-version = "2.4"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/geotiger"]
+core-metadata-version = "2.4"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

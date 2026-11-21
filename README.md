@@ -20,8 +20,8 @@ WGS84 latitude/longitude.
 
 ## Quick start
 
-```powershell
-uv sync --extra dev --extra demo
+```bash
+pip install geotiger
 ```
 
 ```python
@@ -109,15 +109,17 @@ same DuckDB file to limit peak memory use.
 
 ## Demo notebooks
 
-- [DC five-address demo](notebooks/dc_five_addresses_demo.ipynb): downloads and
-  prepares DC TIGER data, geocodes five coordinate-free inputs, and renders a
-  static offline map plus a Folium map with optional OpenStreetMap tiles.
-- [Durham crime demo](notebooks/durham_demo.ipynb): combines Durham, Orange,
-  and Wake County TIGER data into one geocoder and processes the large public
-  Durham crime table locally.
-- [Statewide TIGER demo](notebooks/statewide_tiger_demo.ipynb): builds a whole
-  Delaware reference with `county=None`, times 10,000 randomized statewide
-  inputs with controlled errors, and maps a statewide sample.
+- [DC five-address demo](https://github.com/apwheele/geotiger/blob/main/notebooks/dc_five_addresses_demo.ipynb):
+  downloads and prepares DC TIGER data, geocodes five coordinate-free inputs,
+  and renders a static offline map plus a Folium map with optional
+  OpenStreetMap tiles.
+- [Durham crime demo](https://github.com/apwheele/geotiger/blob/main/notebooks/durham_demo.ipynb):
+  combines Durham, Orange, and Wake County TIGER data into one geocoder and
+  processes the large public Durham crime table locally.
+- [Statewide TIGER demo](https://github.com/apwheele/geotiger/blob/main/notebooks/statewide_tiger_demo.ipynb):
+  builds a whole Delaware reference with `county=None`, times 10,000
+  randomized statewide inputs with controlled errors, and maps a statewide
+  sample.
 
 To view and run the demos locally from the repository root:
 
@@ -145,7 +147,7 @@ uv run jupyter nbconvert --to notebook --execute --inplace notebooks/dc_five_add
 ```
 
 The Durham unmatched review is in
-[reports/durham_unmatched_review.md](reports/durham_unmatched_review.md).
+[reports/durham_unmatched_review.md](https://github.com/apwheele/geotiger/blob/main/reports/durham_unmatched_review.md).
 
 ## Privacy and testing
 

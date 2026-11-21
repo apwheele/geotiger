@@ -31,7 +31,9 @@ _US_ROUTE_RE = re.compile(
     r"^(?:US|U S)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?\s*"
     r"(\d+(?:\s+\d+)*)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$"
 )
-_INTERSTATE_RE = re.compile(r"^(?:I|INTERSTATE)\s*(\d+[A-Z]?(?:\s+\d+[A-Z]?)*)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$")
+_INTERSTATE_RE = re.compile(
+    r"^(?:I|INTERSTATE)\s*(\d+[A-Z]?(?:\s+\d+[A-Z]?)*)\s*(?:HWY|HIGHWAY|RTE|ROUTE)?$"
+)
 _ROUTE_NUMBER_RE = re.compile(r"\d+[A-Z]?")
 _ROUTE_KEY_PREFIX_RE = re.compile(r"^(US|I|[A-Z]{2}) (.+)$")
 # Prefixes usaddress sometimes labels as PreDirectional on numbered routes.
